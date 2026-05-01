@@ -412,6 +412,9 @@ class VoxCPM2TalkerForConditionalGeneration(nn.Module):
         # post-__init__ profiling claims the remaining GPU memory for KV cache.
         # Required for load_format=dummy: DummyModelLoader only randomizes
         # already-registered nn.Parameters.
+        # NOTE: from_pretrained() is unconditional, so load_format=dummy still pays
+        # the checkpoint download/read cost at construction time; DummyModelLoader
+        # will then randomize the just-loaded _tts params — this is intended.
         model_path = vllm_config.model_config.model
         VoxCPM = import_voxcpm2_core()
         native = VoxCPM.from_pretrained(model_path, load_denoiser=False, optimize=False)
