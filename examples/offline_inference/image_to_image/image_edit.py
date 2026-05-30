@@ -232,6 +232,14 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Enable expert parallelism for MoE layers.",
     )
+    parser.add_argument(
+        "--quantization",
+        type=str,
+        default=None,
+        choices=["fp8", "int8"],
+        help="Online quantization method for the transformer and (where supported) the text encoder. "
+        "Default: None (BF16).",
+    )
     parser.add_argument("--layers", type=int, default=4, help="Number of layers to decompose the input image into.")
     parser.add_argument(
         "--resolution",
@@ -432,6 +440,10 @@ def main():
         }
 
     # Initialize Omni with appropriate pipeline
+    omni_kwargs: dict[str, Any] = {}
+    if args.quantization:
+        omni_kwargs["quantization"] = args.quantization
+
     omni = Omni(
         model=args.model,
         enable_layerwise_offload=args.enable_layerwise_offload,
@@ -444,6 +456,7 @@ def main():
         enable_cpu_offload=args.enable_cpu_offload,
         enable_diffusion_pipeline_profiler=args.enable_diffusion_pipeline_profiler,
         profiler_config=args.profiler_config,
+        **omni_kwargs,
     )
     print("Pipeline loaded")
 
