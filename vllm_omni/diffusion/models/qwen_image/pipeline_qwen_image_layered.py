@@ -35,6 +35,11 @@ from vllm_omni.diffusion.models.qwen_image.cfg_parallel import (
 from vllm_omni.diffusion.models.qwen_image.qwen_image_transformer import (
     QwenImageTransformer2DModel,
 )
+from vllm_omni.diffusion.models.qwen_image.text_encoder_quant import (
+    build_quantized_qwen_vl_text_encoder,
+    remap_qwen_vl_text_encoder_weights,
+    text_encoder_quant_enabled,
+)
 from vllm_omni.diffusion.profiler.diffusion_pipeline_profiler import DiffusionPipelineProfilerMixin
 from vllm_omni.diffusion.request import OmniDiffusionRequest
 from vllm_omni.diffusion.utils.prompt_utils import (
@@ -226,13 +231,20 @@ class QwenImageLayeredPipeline(nn.Module, SupportImageInput, QwenImageCFGParalle
             local_files_only=local_files_only,
         )
 
+        quantize_text_encoder = text_encoder_quant_enabled(od_config)
+
         # modules keep same as transformers & diffusers
         self.scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(
             model, subfolder="scheduler", local_files_only=local_files_only
         )
-        self.text_encoder = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-            model, subfolder="text_encoder", local_files_only=local_files_only
-        ).to(self.device)
+        if quantize_text_encoder:
+            self.text_encoder = build_quantized_qwen_vl_text_encoder(
+                model, od_config, self.device, local_files_only=local_files_only
+            )
+        else:
+            self.text_encoder = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+                model, subfolder="text_encoder", local_files_only=local_files_only
+            ).to(self.device)
         self.vae = AutoencoderKLQwenImage.from_pretrained(model, subfolder="vae", local_files_only=local_files_only).to(
             self.device
         )
@@ -251,9 +263,22 @@ class QwenImageLayeredPipeline(nn.Module, SupportImageInput, QwenImageCFGParalle
                 fall_back_to_pt=True,
             )
         ]
+        if quantize_text_encoder:
+            # Quantized encoder streams through the loader, not from_pretrained.
+            self.weights_sources.append(
+                DiffusersPipelineLoader.ComponentSource(
+                    model_or_path=od_config.model,
+                    subfolder="text_encoder",
+                    revision=None,
+                    prefix="text_encoder.",
+                    fall_back_to_pt=True,
+                )
+            )
 
         transformer_kwargs = get_transformer_config_kwargs(od_config.tf_model_config, QwenImageTransformer2DModel)
-        self.transformer = QwenImageTransformer2DModel(od_config=od_config, **transformer_kwargs)
+        self.transformer = QwenImageTransformer2DModel(
+            od_config=od_config, quant_config=od_config.quantization_config, **transformer_kwargs
+        )
 
         # Pipeline configuration & processing parameters
         self.vae_scale_factor = 2 ** len(self.vae.temperal_downsample) if getattr(self, "vae", None) else 8
@@ -897,4 +922,11 @@ the image\n<|vision_start|><|image_pad|><|vision_end|><|im_end|>\n<|im_start|>as
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights)
+        if text_encoder_quant_enabled(self.od_config):
+            weights = remap_qwen_vl_text_encoder_weights(weights)
+        loaded_weights = loader.load_weights(weights)
+        if text_encoder_quant_enabled(self.od_config) and self.text_encoder is not None:
+            # Tied lm_head.weight is absent from the checkpoint; report encoder
+            # params so the loader's strict check passes.
+            loaded_weights |= {f"text_encoder.{name}" for name, _ in self.text_encoder.named_parameters()}
+        return loaded_weights
