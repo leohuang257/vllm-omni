@@ -28,11 +28,11 @@ _SAVE_CODES_PATH = os.environ.get("SONGGEN_SAVE_CODES")
 
 # Token IDs from configuration_songgeneration_v2.py.
 _CODE_DEPTH = 3
-_VALID_CODE_MAX = 16383   # 0..16383 are valid RVQ indices
-_EOS_TOKEN_ID = 16384     # per-stream EOS
-_SPECIAL_TOKEN_ID = 16385 # pad / mask / null
+_VALID_CODE_MAX = 16383  # 0..16383 are valid RVQ indices
+_EOS_TOKEN_ID = 16384  # per-stream EOS
+_SPECIAL_TOKEN_ID = 16385  # pad / mask / null
 _VOCAL_REPLACEMENT = 3142  # used when gen_type='bgm' (vocal-stream filler)
-_BGM_REPLACEMENT = 9670    # used when gen_type='vocal' (bgm-stream filler)
+_BGM_REPLACEMENT = 9670  # used when gen_type='vocal' (bgm-stream filler)
 
 
 # ---------------------------------------------------------------------------
@@ -72,9 +72,7 @@ def lelm_to_flow1dvae(
 
         codes_BKT = _extract_audio_codes(mm)
         if codes_BKT is None:
-            logger.warning(
-                "lelm_to_flow1dvae: request %d had no audio_codes in multimodal_output", i
-            )
+            logger.warning("lelm_to_flow1dvae: request %d had no audio_codes in multimodal_output", i)
             flow1dvae_inputs.append(_empty_omni_tokens_prompt())
             continue
 
@@ -116,9 +114,7 @@ def lelm_to_flow1dvae(
         # Pass through optional prompt-audio waveforms and any per-request
         # metadata. The decoder reads these from
         # ``runtime_additional_information[i]`` in its ``forward()``.
-        additional_information = _build_additional_information(
-            prompt, lelm_output, i, gen_type=gen_type
-        )
+        additional_information = _build_additional_information(prompt, lelm_output, i, gen_type=gen_type)
 
         flow1dvae_inputs.append(
             OmniTokensPrompt(
@@ -159,9 +155,7 @@ def lelm_to_flow1dvae_async_chunk(
     if isinstance(pooling_output, dict):
         frame = _extract_last_frame(pooling_output)
         if frame is not None:
-            transfer_manager.code_prompt_token_ids[request_id].append(
-                frame.detach().to(device="cpu", dtype=torch.long)
-            )
+            transfer_manager.code_prompt_token_ids[request_id].append(frame.detach().to(device="cpu", dtype=torch.long))
     elif not finished:
         return None
 
@@ -199,11 +193,7 @@ def lelm_to_flow1dvae_async_chunk(
         left_context_size = max(0, length - context_length)
         window_frames = transfer_manager.code_prompt_token_ids[request_id][:length]
     else:
-        initial_coverage = (
-            (chunk_size // initial_chunk_size) * initial_chunk_size
-            if initial_chunk_size > 0
-            else 0
-        )
+        initial_coverage = (chunk_size // initial_chunk_size) * initial_chunk_size if initial_chunk_size > 0 else 0
         adjusted = length - initial_coverage
         chunk_length = adjusted % chunk_size
         if chunk_length != 0 and not finished:
@@ -249,9 +239,9 @@ def _extract_audio_codes(mm: dict[str, Any] | OmniPayload) -> torch.Tensor | Non
     return None
 
 
-def _valid_frame_mask(codes_BKT: torch.Tensor) -> torch.Tensor:
+def _valid_frame_mask(codes_bkt: torch.Tensor) -> torch.Tensor:
     """Mark frames that carry at least one valid RVQ index in any stream."""
-    return (codes_BKT <= _VALID_CODE_MAX).any(dim=1)
+    return (codes_bkt <= _VALID_CODE_MAX).any(dim=1)
 
 
 def _empty_omni_tokens_prompt():
@@ -265,19 +255,32 @@ def _empty_omni_tokens_prompt():
     )
 
 
+def _gen_type_from_entry(entry: Any) -> str | None:
+    """Pull gen_type from a prompt dict (top-level or additional_information)."""
+    if isinstance(entry, dict):
+        v = entry.get("gen_type") or (entry.get("additional_information") or {}).get("gen_type")
+        if v is not None:
+            return str(v)
+    return None
+
+
 def _resolve_gen_type(prompt: Any, lelm_output: Any, idx: int) -> str:
     """Resolve gen_type from request or per-prompt metadata."""
     # Per-request metadata on the RequestOutput.
     ai = getattr(lelm_output, "additional_information", None)
     if isinstance(ai, dict) and "gen_type" in ai:
         return str(ai["gen_type"])
-    # Per-prompt list (matches qwen3_tts extract_*_from_prompt pattern).
-    if isinstance(prompt, list) and idx < len(prompt):
-        entry = prompt[idx]
-        if isinstance(entry, dict):
-            v = entry.get("gen_type") or (entry.get("additional_information") or {}).get("gen_type")
+    # The orchestrator forwards the original request prompt, which is a single
+    # dict for one request or a list when batched. Handle both.
+    if isinstance(prompt, list):
+        if idx < len(prompt):
+            v = _gen_type_from_entry(prompt[idx])
             if v is not None:
-                return str(v)
+                return v
+    else:
+        v = _gen_type_from_entry(prompt)
+        if v is not None:
+            return v
     return "mixed"
 
 
@@ -340,9 +343,7 @@ def _extract_last_frame(pooling_output: dict[str, Any] | OmniPayload) -> torch.T
         if not (audio_codes <= _VALID_CODE_MAX).any():
             return None
         return audio_codes.to(torch.long).reshape(-1)
-    raise ValueError(
-        f"Invalid audio_codes shape for SongGeneration v2 async_chunk: {tuple(audio_codes.shape)}"
-    )
+    raise ValueError(f"Invalid audio_codes shape for SongGeneration v2 async_chunk: {tuple(audio_codes.shape)}")
 
 
 def _read_chunk_config(
@@ -362,11 +363,7 @@ def _read_chunk_config(
     initial_chunk = int(cfg.get("initial_codec_chunk_frames", default_initial))
 
     ai = getattr(request, "additional_information", None)
-    if (
-        ai is not None
-        and hasattr(ai, "entries")
-        and "initial_codec_chunk_frames" in ai.entries
-    ):
+    if ai is not None and hasattr(ai, "entries") and "initial_codec_chunk_frames" in ai.entries:
         entry = ai.entries["initial_codec_chunk_frames"]
         if entry.list_data is not None and len(entry.list_data) == 1:
             initial_chunk = int(entry.list_data[0])

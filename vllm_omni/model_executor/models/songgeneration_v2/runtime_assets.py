@@ -30,10 +30,7 @@ def has_songgeneration_runtime_assets(path: str | os.PathLike[str] | None) -> bo
         return False
     root = Path(path).expanduser()
     return (
-        root.is_dir()
-        and (root / "ckpt").is_dir()
-        and (root / "third_party").is_dir()
-        and (root / "codeclm").is_dir()
+        root.is_dir() and (root / "ckpt").is_dir() and (root / "third_party").is_dir() and (root / "codeclm").is_dir()
     )
 
 

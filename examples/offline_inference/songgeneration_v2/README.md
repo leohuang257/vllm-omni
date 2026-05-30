@@ -8,6 +8,8 @@ via the vLLM-Omni `Omni()` runtime.
 
 ## Prerequisites
 
+### 1. Clone the upstream repo
+
 Stage 1 wraps the upstream Flow1dVAE/Tango source code. You must have a local
 clone of the official SongGeneration repository:
 
@@ -17,6 +19,39 @@ git clone https://github.com/tencent-ailab/SongGeneration.git
 
 Model weights and runtime assets (checkpoints, tokenizer) are **downloaded
 automatically** on first run from HuggingFace. No manual download needed.
+
+### 2. Install upstream Python dependencies
+
+Stage 1 imports the upstream audio stack at runtime, so the following PyPI
+packages must be available in your vLLM-Omni environment:
+
+```bash
+pip install \
+  ninja alias-free-torch descript-audio-codec einops-exts flashy \
+  nnAudio openunmix x-transformers vector-quantize-pytorch \
+  k-diffusion julius librosa kaldiio lameenc
+```
+
+> **Do not** run `pip install -r SongGeneration/requirements.txt` directly.
+> That file pins `torch==2.6.0`, `transformers==4.37.2`, `diffusers==0.27.2`,
+> and `huggingface-hub==0.25.2`, which conflict with and would downgrade the
+> versions vLLM-Omni requires. Install only the leaf audio packages above.
+
+### 3. Add a root `config.json`
+
+Omni resolves the model type from a `config.json` at the repo root, but the
+upstream repo / HuggingFace snapshots do not ship one. Create it once:
+
+```bash
+cat > /path/to/SongGeneration/config.json <<'EOF'
+{
+  "model_type": "songgeneration_v2",
+  "architectures": ["SongGenerationV2LeLMForConditionalGeneration"]
+}
+EOF
+```
+
+Without it, `Omni(...)` fails with `Could not determine model_type`.
 
 ## Quick Start
 

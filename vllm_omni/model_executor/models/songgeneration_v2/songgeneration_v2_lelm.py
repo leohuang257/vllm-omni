@@ -15,7 +15,13 @@ from __future__ import annotations
 import os
 from collections import deque
 from collections.abc import Iterable
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from vllm_omni.model_executor.models.songgeneration_v2.ar_state import ArState
+    from vllm_omni.model_executor.models.songgeneration_v2.configuration_songgeneration_v2 import (
+        SongGenerationV2LeLMConfig,
+    )
 
 import torch
 import torch.nn as nn
@@ -57,7 +63,7 @@ class SongGenV2LeLMNullModel(nn.Module):
     via load_weights (same checkpoint tensors, different runtime KV state).
     """
 
-    def __init__(self, config: "SongGenerationV2LeLMConfig"):
+    def __init__(self, config: SongGenerationV2LeLMConfig):
         super().__init__()
         from transformers import LlamaConfig as HFLlamaConfig
         from transformers.models.llama.modeling_llama import LlamaModel as HFLlamaModel
@@ -164,12 +170,8 @@ class SongGenerationV2LeLMForConditionalGeneration(nn.Module):
         self.code_size = int(config.code_size) + 1
         self.input_emb_dim = int(config.code_size) + 2
         self.dim = int(config.dim)
-        self.cfg_coef = float(
-            (config.reference_generation_params or {}).get("cfg_coef", 1.5)
-        )
-        self.top_k_per_stream: list[int] = list(
-            getattr(config, "top_k_per_stream", [5000, 1, 1])
-        )
+        self.cfg_coef = float((config.reference_generation_params or {}).get("cfg_coef", 1.5))
+        self.top_k_per_stream: list[int] = list(getattr(config, "top_k_per_stream", [5000, 1, 1]))
 
         # LlamaModel reads hf_config directly from vllm_config.model_config.
         # When the top-level config is SongGenerationV2Config (composition),
@@ -201,6 +203,7 @@ class SongGenerationV2LeLMForConditionalGeneration(nn.Module):
             )
         else:
             from vllm.model_executor.models.utils import PPMissingLayer
+
             self.lm_head = PPMissingLayer()
 
         self.logits_processor = LogitsProcessor(self.code_size)
@@ -212,9 +215,7 @@ class SongGenerationV2LeLMForConditionalGeneration(nn.Module):
         self.emb = nn.ModuleList([nn.Embedding(self.input_emb_dim, self.dim)])
 
         # --- Streams 1+2 components ---
-        self.layer2_emb = nn.ModuleList(
-            [nn.Embedding(self.input_emb_dim, self.dim) for _ in range(self.code_depth)]
-        )
+        self.layer2_emb = nn.ModuleList([nn.Embedding(self.input_emb_dim, self.dim) for _ in range(self.code_depth)])
         if self.code_depth > 1:
             self.linears = nn.ModuleList(
                 [nn.Linear(self.dim, self.code_size, bias=False) for _ in range(self.code_depth - 1)]
@@ -255,6 +256,7 @@ class SongGenerationV2LeLMForConditionalGeneration(nn.Module):
 
         # --- Condition provider + fuser (for CFG) ---
         from .condition_fuser import ConditionFuser
+
         fuser_cfg = config.fuser or {"sum": [], "prepend": []}
         self.fuser = ConditionFuser(
             fuse2cond={
@@ -270,9 +272,7 @@ class SongGenerationV2LeLMForConditionalGeneration(nn.Module):
 
         # Delayed pattern config
         cp = config.codebooks_pattern or {}
-        self._delays: list[int] = list(
-            (cp.get("delay") or {}).get("delays") or [0, 0, 0]
-        )
+        self._delays: list[int] = list((cp.get("delay") or {}).get("delays") or [0, 0, 0])
 
         # Keep hidden_states.last on GPU to avoid CPU round-trip
         self.gpu_resident_buffer_keys: set[tuple[str, str]] = {
@@ -291,7 +291,7 @@ class SongGenerationV2LeLMForConditionalGeneration(nn.Module):
         # Full null hidden sequence (only during prefill, for t2 null prefill)
         self._null_hidden1_full: dict[str, torch.Tensor] = {}
         # Per-request AR state machines: {request_id: ArState}
-        self._ar_states: dict[str, "ArState"] = {}
+        self._ar_states: dict[str, ArState] = {}
         # Requests that have finished generation — force EOS on next compute_logits
         self._force_eos_reqs: set[str] = set()
         # Queue of (request_id, null_embeds) for the current batch,
@@ -309,8 +309,9 @@ class SongGenerationV2LeLMForConditionalGeneration(nn.Module):
     def _patch_custom_kernels(module: nn.Module) -> None:
         """Force RMSNorm and activation ops to use native Python paths."""
         import types
-        from vllm.model_executor.layers.layernorm import RMSNorm
+
         from vllm.model_executor.custom_op import CustomOp
+        from vllm.model_executor.layers.layernorm import RMSNorm
 
         def _native_rmsnorm(self_norm, x, residual=None):
             if residual is not None:
@@ -327,7 +328,7 @@ class SongGenerationV2LeLMForConditionalGeneration(nn.Module):
             if isinstance(submodule, RMSNorm):
                 submodule.forward = types.MethodType(_native_rmsnorm, submodule)
             if isinstance(submodule, CustomOp):
-                if hasattr(submodule, 'forward_native'):
+                if hasattr(submodule, "forward_native"):
                     submodule._forward_method = submodule.forward_native
 
     @property
@@ -391,7 +392,6 @@ class SongGenerationV2LeLMForConditionalGeneration(nn.Module):
 
         return hidden
 
-
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
@@ -435,13 +435,14 @@ class SongGenerationV2LeLMForConditionalGeneration(nn.Module):
                 guided_logits = cond_logits.clone()
                 guided_logits[-1:] = guided_last
             elif null_hidden.shape[0] > cond_logits.shape[0]:
-                null_hidden = null_hidden[-cond_logits.shape[0]:]
+                null_hidden = null_hidden[-cond_logits.shape[0] :]
                 uncond_logits = torch.nn.functional.linear(null_hidden, lm_weight)
                 guided_logits = uncond_logits + self.cfg_coef * (cond_logits - uncond_logits)
             else:
                 logger.warning(
                     "Null hidden (%d) vs cond (%d) size mismatch, skipping CFG",
-                    null_hidden.shape[0], cond_logits.shape[0],
+                    null_hidden.shape[0],
+                    cond_logits.shape[0],
                 )
                 guided_logits = cond_logits
         else:
@@ -484,7 +485,7 @@ class SongGenerationV2LeLMForConditionalGeneration(nn.Module):
     def preprocess(
         self,
         input_ids: torch.Tensor,
-        input_embeds: Optional[torch.Tensor],
+        input_embeds: torch.Tensor | None,
         **info_dict: Any,
     ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
         """Prepare per-request conditioning, null-path embeddings, and AR state.
@@ -512,8 +513,7 @@ class SongGenerationV2LeLMForConditionalGeneration(nn.Module):
 
         info_update: dict[str, Any] = {
             k: info_dict[k]
-            for k in ("lyric", "lyrics", "descriptions", "gen_type",
-                      "prompt_audio_codes", "seed", "max_gen_len")
+            for k in ("lyric", "lyrics", "descriptions", "gen_type", "prompt_audio_codes", "seed", "max_gen_len")
             if k in info_dict
         }
 
@@ -530,9 +530,7 @@ class SongGenerationV2LeLMForConditionalGeneration(nn.Module):
         if is_prefill:
             # Always compute our own embeddings — never use runner buffer
             own_embeds = self.embed_input_ids(input_ids)
-            cond_embeds, null_embeds = self._prepare_cfg_embeddings(
-                own_embeds, info_dict, req_id=req_id
-            )
+            cond_embeds, null_embeds = self._prepare_cfg_embeddings(own_embeds, info_dict, req_id=req_id)
             # Reset KV caches for this request (new generation)
             self._null_kv_states[req_id] = None
             self._t2_kv_states[req_id] = None
@@ -543,6 +541,7 @@ class SongGenerationV2LeLMForConditionalGeneration(nn.Module):
 
             # Initialize the delayed-pattern AR state machine
             from .ar_state import ArState
+
             max_dur = int(self.config.max_position_embeddings)
             max_gen_len = int(info_dict.get("max_gen_len", max_dur * 0.7))
             self._ar_states[req_id] = ArState.create(
@@ -560,7 +559,11 @@ class SongGenerationV2LeLMForConditionalGeneration(nn.Module):
                     "[CRITICAL] prompt_token_ids length (%d) != condition_embeds length (%d). "
                     "Only %d of %d condition tokens will enter PagedAttention! "
                     "Set prompt_token_ids = [0] * %d to fix.",
-                    span_len, cond_len, min(span_len, cond_len), cond_len, cond_len,
+                    span_len,
+                    cond_len,
+                    min(span_len, cond_len),
+                    cond_len,
+                    cond_len,
                 )
             # Return in-vocab input_ids (bookkeeping only; embeddings carry semantics)
             input_ids_out = input_ids.clamp(0, self.code_size - 1)
@@ -665,12 +668,12 @@ class SongGenerationV2LeLMForConditionalGeneration(nn.Module):
 
         # Build stream12 embedding for the single start token position
         special_ids = torch.full(
-            (1, 1), min(self.special_token_id, self.input_emb_dim - 1),
-            dtype=torch.long, device=device,
+            (1, 1),
+            min(self.special_token_id, self.input_emb_dim - 1),
+            dtype=torch.long,
+            device=device,
         )
-        input2_emb = sum(
-            self.layer2_emb[k](special_ids) for k in range(1, self.code_depth)
-        )  # [1, 1, dim]
+        input2_emb = sum(self.layer2_emb[k](special_ids) for k in range(1, self.code_depth))  # [1, 1, dim]
 
         # Fuse conditions (prepend on first step) for BOTH paths
         cond_fused1, cond_fused2 = self.fuser(start_emb, input2_emb, cond_half, first_step=True)
@@ -686,7 +689,7 @@ class SongGenerationV2LeLMForConditionalGeneration(nn.Module):
     def _compute_stream12(
         self,
         req_id: str,
-        state: "ArState",
+        state: ArState,
         hidden1_last: torch.Tensor,
     ) -> torch.Tensor | None:
         """Run transformer2 to predict streams 1+2 tokens at current step.
@@ -779,7 +782,7 @@ class SongGenerationV2LeLMForConditionalGeneration(nn.Module):
                     unique_toks = torch.unique(recent)
                     q_count = torch.bincount(unique_toks)
                     tmp = min(q_count.shape[-1], self.code_size - 1)
-                    guided_logits_k[0, :tmp] /= (1.1 ** q_count[:tmp].to(guided_logits_k.dtype))
+                    guided_logits_k[0, :tmp] /= 1.1 ** q_count[:tmp].to(guided_logits_k.dtype)
 
             tok = torch.argmax(guided_logits_k, dim=-1).item()
             tokens.append(tok)
@@ -892,7 +895,7 @@ class SongGenerationV2LeLMForConditionalGeneration(nn.Module):
             null_h1_full = self._null_hidden1_full.pop(req_id, None)
             if null_h1_full is not None:
                 null_h1_seq = null_h1_full.unsqueeze(0).to(device=h1.device, dtype=h1.dtype)
-                null_h1_seq = null_h1_seq[:, :h1.shape[1], :]
+                null_h1_seq = null_h1_seq[:, : h1.shape[1], :]
             else:
                 null_h1_seq = torch.zeros_like(h1)
 
@@ -983,22 +986,23 @@ class SongGenerationV2LeLMForConditionalGeneration(nn.Module):
             if os.path.isfile(path):
                 return path
         raise FileNotFoundError(
-            f"SongGeneration v2 LeLM checkpoint not found under {base}. "
-            "Expected songgeneration_v2_large/model.pt."
+            f"SongGeneration v2 LeLM checkpoint not found under {base}. Expected songgeneration_v2_large/model.pt."
         )
 
-    def _strip_audiolm_prefix(
-        self, weights: Iterable[tuple[str, torch.Tensor]]
-    ) -> Iterable[tuple[str, torch.Tensor]]:
+    def _strip_audiolm_prefix(self, weights: Iterable[tuple[str, torch.Tensor]]) -> Iterable[tuple[str, torch.Tensor]]:
         """Strip 'audiolm.' prefix and skip modules loaded separately or unused."""
         for name, tensor in weights:
             if not name.startswith("audiolm."):
                 continue
-            name = name[len("audiolm."):]
-            if name.startswith((
-                "att_dropout.", "cfg_dropout.", "transformer2.",
-                "condition_provider.",
-            )):
+            name = name[len("audiolm.") :]
+            if name.startswith(
+                (
+                    "att_dropout.",
+                    "cfg_dropout.",
+                    "transformer2.",
+                    "condition_provider.",
+                )
+            ):
                 continue
             yield name, tensor
 
@@ -1033,7 +1037,7 @@ class SongGenerationV2LeLMForConditionalGeneration(nn.Module):
         null_state = {}
         for name, tensor in self._strip_audiolm_prefix(raw.items()):
             if name.startswith("transformer.model."):
-                hf_name = name[len("transformer.model."):]
+                hf_name = name[len("transformer.model.") :]
                 null_state[hf_name] = tensor
         info = self.null_model.model.load_state_dict(null_state, strict=False)
         if info.unexpected_keys:
@@ -1046,25 +1050,27 @@ class SongGenerationV2LeLMForConditionalGeneration(nn.Module):
             prefix = "audiolm.transformer2.model."
             for name, tensor in raw.items():
                 if name.startswith(prefix):
-                    hf_name = name[len(prefix):]
+                    hf_name = name[len(prefix) :]
                     t2_state[hf_name] = tensor
             if t2_state:
                 info_t2 = self.transformer2.load_state_dict(t2_state, strict=False)
                 if info_t2.unexpected_keys:
                     logger.debug("transformer2 unexpected keys: %s", info_t2.unexpected_keys[:5])
                 loaded |= {f"transformer2.{k}" for k in t2_state if k not in info_t2.unexpected_keys}
-                logger.info("SongGenerationV2LeLM: loaded %d transformer2 params", len(t2_state) - len(info_t2.unexpected_keys))
+                loaded_t2 = len(t2_state) - len(info_t2.unexpected_keys)
+                logger.info("SongGenerationV2LeLM: loaded %d transformer2 params", loaded_t2)
 
         # Load condition_provider eagerly (NOT lazily at first request).
         # The checkpoint has audiolm.condition_provider.* weights for
         # output_proj, structure_emb, prompt_audio embeddings, EOT_emb, etc.
         provider_state = {
-            name[len("audiolm.condition_provider."):]: tensor
+            name[len("audiolm.condition_provider.") :]: tensor
             for name, tensor in raw.items()
             if name.startswith("audiolm.condition_provider.")
         }
         if provider_state:
             from .conditioners import build_conditioner_provider as _build_conditioner_provider
+
             dev = next(self.model.parameters()).device
             self.condition_provider = _build_conditioner_provider(
                 self.config,
@@ -1086,7 +1092,7 @@ class SongGenerationV2LeLMForConditionalGeneration(nn.Module):
         self,
         lyrics: list[str | None],
         descriptions: list[str | None] | None = None,
-        prompt_audio_codes: "torch.Tensor | None" = None,
+        prompt_audio_codes: torch.Tensor | None = None,
         gen_type: str = "mixed",
     ) -> int:
         """Pre-compute the total prompt length (condition prefix + 1 start token).

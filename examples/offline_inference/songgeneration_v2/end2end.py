@@ -50,12 +50,7 @@ _COMMON_LOCAL_PATHS = [
 _HF_MODEL_REPO = "lglg666/SongGeneration-v2-large"
 _HF_RUNTIME_REPO = "lglg666/SongGeneration-Runtime"
 
-DEFAULT_DEPLOY_CONFIG = str(
-    Path(__file__).resolve().parents[3]
-    / "vllm_omni"
-    / "deploy"
-    / "songgeneration_v2.yaml"
-)
+DEFAULT_DEPLOY_CONFIG = str(Path(__file__).resolve().parents[3] / "vllm_omni" / "deploy" / "songgeneration_v2.yaml")
 
 
 def _has_source_code(path: str | os.PathLike[str]) -> bool:
@@ -66,10 +61,7 @@ def _has_source_code(path: str | os.PathLike[str]) -> bool:
 
 def _has_model_weights(path: str | os.PathLike[str]) -> bool:
     root = Path(path).expanduser()
-    return (
-        (root / "songgeneration_v2_large" / "model.pt").is_file()
-        or (root / "model.pt").is_file()
-    )
+    return (root / "songgeneration_v2_large" / "model.pt").is_file() or (root / "model.pt").is_file()
 
 
 def _has_runtime_assets(path: str | os.PathLike[str]) -> bool:
@@ -215,7 +207,7 @@ SAMPLE_QUERIES: dict[str, dict[str, Any]] = {
             "在这人间天堂.让我们紧紧相拥 ; "
             "[outro-long]"
         ),
-        "descriptions": "female, dark, pop, sad, piano and drums, the bpm is 125.",
+        "descriptions": "female, dark, hip hop, sad, piano and drums",
         "gen_type": "vocal",
     },
     "bgm": {
@@ -292,14 +284,13 @@ def _estimate_prompt_len(
     ckpt_path = next((p for p in ckpt_candidates if p.is_file()), None)
     if ckpt_path is None:
         raise FileNotFoundError(
-            f"model.pt not found under {model_path}. "
-            "Expected songgeneration_v2_large/model.pt or model.pt."
+            f"model.pt not found under {model_path}. Expected songgeneration_v2_large/model.pt or model.pt."
         )
     raw = torch.load(str(ckpt_path), map_location="cpu", weights_only=False)
     if isinstance(raw, dict) and "state_dict" in raw:
         raw = raw["state_dict"]
     provider_state = {
-        name[len("audiolm.condition_provider."):]: tensor
+        name[len("audiolm.condition_provider.") :]: tensor
         for name, tensor in raw.items()
         if name.startswith("audiolm.condition_provider.")
     }
@@ -332,7 +323,7 @@ def _estimate_prompt_len(
 
     del provider, cond_tensors, cond_half, fuser, dummy, fused
     if torch.cuda.is_available():
-        torch.cuda.empty_cache()
+        torch.accelerator.empty_cache()
     return prompt_len
 
 
@@ -425,7 +416,11 @@ def _save_wav(output_dir: str, request_id: str, audio: Any, sr: int) -> str:
     peak = float(abs(arr).max()) if arr.size else 0.0
     logger.info(
         "Saved %s  shape=%s sr=%d duration=%.2fs peak=%.4f",
-        out_path, arr.shape, sr, duration, peak,
+        out_path,
+        arr.shape,
+        sr,
+        duration,
+        peak,
     )
     return str(out_path)
 
@@ -493,7 +488,9 @@ def parse_args() -> Any:
         description="SongGeneration v2 offline inference with vLLM Omni",
     )
     parser.add_argument(
-        "--model", type=str, default=None,
+        "--model",
+        type=str,
+        default=None,
         help=(
             "Path to local SongGeneration repo (must contain codeclm/). "
             "Auto-detects from SONGGENERATION_REPO env or common paths if omitted."
@@ -501,31 +498,42 @@ def parse_args() -> Any:
     )
     parser.add_argument("--deploy-config", type=str, default=DEFAULT_DEPLOY_CONFIG)
     parser.add_argument(
-        "--query-type", choices=["mixed", "vocal", "bgm"], default="mixed",
+        "--query-type",
+        choices=["mixed", "vocal", "bgm"],
+        default="mixed",
         help="Generation mode with built-in sample lyrics.",
     )
     parser.add_argument(
-        "--lyric", type=str, default=None,
+        "--lyric",
+        type=str,
+        default=None,
         help="Override the built-in sample lyrics.",
     )
     parser.add_argument(
-        "--descriptions", type=str, default=None,
+        "--descriptions",
+        type=str,
+        default=None,
         help="Override the built-in style description (comma-separated tags).",
     )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--max-gen-len", type=int, default=750)
     parser.add_argument(
-        "--duration-sec", type=float, default=None,
+        "--duration-sec",
+        type=float,
+        default=None,
         help="Target audio duration in seconds (overrides --max-gen-len).",
     )
     parser.add_argument(
-        "--prompt-len", type=int, default=None,
+        "--prompt-len",
+        type=int,
+        default=None,
         help="Override Stage-0 prompt length (or set SONGGEN_PROMPT_LEN env).",
     )
     parser.add_argument("--output-dir", type=str, default="output_songgeneration_v2")
     parser.add_argument("--stage-init-timeout", type=int, default=600)
     parser.add_argument(
-        "--no-auto-download", action="store_true",
+        "--no-auto-download",
+        action="store_true",
         help="Disable automatic download of missing weights/assets from HuggingFace.",
     )
     return parser.parse_args()

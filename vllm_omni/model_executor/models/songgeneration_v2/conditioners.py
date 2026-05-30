@@ -9,20 +9,19 @@ classes; weight layout matches the checkpoint (``audiolm.condition_provider.*``)
 from __future__ import annotations
 
 import os
+import warnings
 from collections import defaultdict
 from copy import deepcopy
 from dataclasses import dataclass, field
 from itertools import chain
-from typing import Any, Dict, List, NamedTuple, Optional, Tuple
-import warnings
+from typing import Any, NamedTuple
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-
 # (input1 cond emb, input2 cond emb, mask) -- same triple the fuser consumes.
-ConditionType = Tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+ConditionType = tuple[torch.Tensor, torch.Tensor, torch.Tensor]
 
 
 # ---------------------------------------------------------------------------
@@ -30,7 +29,7 @@ ConditionType = Tuple[torch.Tensor, torch.Tensor, torch.Tensor]
 # ---------------------------------------------------------------------------
 
 
-def _length_to_mask(lengths: torch.Tensor, max_len: Optional[int] = None) -> torch.Tensor:
+def _length_to_mask(lengths: torch.Tensor, max_len: int | None = None) -> torch.Tensor:
     """Length vector -> right-padded boolean mask.
 
     ``[3, 5] -> [[1,1,1,0,0], [1,1,1,1,1]]`` (cast to int by caller).
@@ -51,29 +50,29 @@ class AudioCondition(NamedTuple):
 
     wav: torch.Tensor
     length: torch.Tensor
-    sample_rate: List[int]
-    path: List[Optional[str]] = []
-    seek_time: List[Optional[float]] = []
+    sample_rate: list[int]
+    path: list[str | None] = []
+    seek_time: list[float | None] = []
 
 
 @dataclass
 class ConditioningAttributes:
-    text: Dict[str, Optional[str]] = field(default_factory=dict)
-    audio: Dict[str, AudioCondition] = field(default_factory=dict)
+    text: dict[str, str | None] = field(default_factory=dict)
+    audio: dict[str, AudioCondition] = field(default_factory=dict)
 
     def __getitem__(self, item: str):  # mimic upstream sample["text"] access
         return getattr(self, item)
 
     @property
-    def text_attributes(self) -> List[str]:
+    def text_attributes(self) -> list[str]:
         return list(self.text.keys())
 
     @property
-    def audio_attributes(self) -> List[str]:
+    def audio_attributes(self) -> list[str]:
         return list(self.audio.keys())
 
     @property
-    def attributes(self) -> Dict[str, List[str]]:
+    def attributes(self) -> dict[str, list[str]]:
         return {"text": self.text_attributes, "audio": self.audio_attributes}
 
 
@@ -152,11 +151,11 @@ class QwTokenizerConditioner(TextConditioner):
         output_dim: int,
         token_path: str = "",
         max_len: int = 600,
-        add_token_list: Optional[List[str]] = None,
+        add_token_list: list[str] | None = None,
         version: str = "v2",
         # vocab_size override lets us build the module on ``meta`` device
         # for shape-only checks without instantiating the tokenizer.
-        vocab_size: Optional[int] = None,
+        vocab_size: int | None = None,
     ):
         if add_token_list is None:
             add_token_list = []
@@ -167,7 +166,7 @@ class QwTokenizerConditioner(TextConditioner):
         self._token_path = token_path
         self._add_token_list = add_token_list
         self._tokenizer: Any = None  # lazy
-        self._struct_token_ids: List[int] = []
+        self._struct_token_ids: list[int] = []
 
         if vocab_size is None:
             # Eager tokenizer load -- the upstream path.
@@ -178,9 +177,7 @@ class QwTokenizerConditioner(TextConditioner):
                 self._tokenizer.add_tokens(add_token_list, special_tokens=True)
             vocab_size = len(self._tokenizer.get_vocab())
             vocab = self._tokenizer.get_vocab()
-            self._struct_token_ids = [
-                vocab[t] for t in add_token_list if t and t[0] == "[" and t[-1] == "]"
-            ]
+            self._struct_token_ids = [vocab[t] for t in add_token_list if t and t[0] == "[" and t[-1] == "]"]
 
         super().__init__(vocab_size, output_dim, input_token=True, padding_idx=151643)
         self.max_len = max_len
@@ -199,18 +196,16 @@ class QwTokenizerConditioner(TextConditioner):
         if self._add_token_list:
             self._tokenizer.add_tokens(self._add_token_list, special_tokens=True)
         vocab = self._tokenizer.get_vocab()
-        self._struct_token_ids = [
-            vocab[t] for t in self._add_token_list if t and t[0] == "[" and t[-1] == "]"
-        ]
+        self._struct_token_ids = [vocab[t] for t in self._add_token_list if t and t[0] == "[" and t[-1] == "]"]
 
-    def tokenize(self, x: List[Optional[str]]) -> Dict[str, torch.Tensor]:
+    def tokenize(self, x: list[str | None]) -> dict[str, torch.Tensor]:
         self._ensure_tokenizer()
         # The upstream code always prepends ``<|im_start|>`` (id 151644) --
         # see conditioners.py:139 -- even for None inputs (CFG null).
         x = ["<|im_start|>" + xi if xi is not None else "<|im_start|>" for xi in x]
         return self._tokenizer(x, return_tensors="pt", padding=True)
 
-    def forward(self, inputs: Dict[str, torch.Tensor]) -> ConditionType:
+    def forward(self, inputs: dict[str, torch.Tensor]) -> ConditionType:
         mask = inputs["attention_mask"]
         tokens = inputs["input_ids"]
 
@@ -232,9 +227,7 @@ class QwTokenizerConditioner(TextConditioner):
 
         if self.max_len is not None:
             if tokens.shape[-1] > self.max_len:
-                warnings.warn(
-                    f"QwTokenizerConditioner max_len={self.max_len} exceeded; truncating lyrics."
-                )
+                warnings.warn(f"QwTokenizerConditioner max_len={self.max_len} exceeded; truncating lyrics.")
             device = self.output_proj.weight.device
             tokens = _pad_2d(tokens, self.max_len, self.pad_token_idx).to(device)
             mask = _pad_2d(mask, self.max_len, 0).to(device)
@@ -276,7 +269,7 @@ class QwTextConditioner(TextConditioner):
         token_path: str = "",
         max_len: int = 100,
         version: str = "v2",
-        vocab_size: Optional[int] = None,
+        vocab_size: int | None = None,
     ):
         self._token_path = token_path
         self._tokenizer: Any = None
@@ -302,20 +295,18 @@ class QwTextConditioner(TextConditioner):
         if self._extra:
             self._tokenizer.add_tokens(self._extra, special_tokens=True)
 
-    def tokenize(self, x: List[Optional[str]]) -> Dict[str, torch.Tensor]:
+    def tokenize(self, x: list[str | None]) -> dict[str, torch.Tensor]:
         self._ensure_tokenizer()
         x = ["<|im_start|>" + xi if xi is not None else "<|im_start|>" for xi in x]
         return self._tokenizer(x, return_tensors="pt", padding=True)
 
-    def forward(self, inputs: Dict[str, torch.Tensor]) -> ConditionType:
+    def forward(self, inputs: dict[str, torch.Tensor]) -> ConditionType:
         mask = inputs["attention_mask"]
         tokens = inputs["input_ids"]
 
         if self.max_len is not None:
             if tokens.shape[-1] > self.max_len:
-                warnings.warn(
-                    f"QwTextConditioner max_len={self.max_len} exceeded; truncating style."
-                )
+                warnings.warn(f"QwTextConditioner max_len={self.max_len} exceeded; truncating style.")
             device = self.output_proj.weight.device
             tokens = _pad_2d(tokens, self.max_len, 151643).to(device)
             mask = _pad_2d(mask, self.max_len, 0).to(device)
@@ -379,13 +370,9 @@ class QuantizedEmbeddingConditioner(AudioConditioner):
             wav = wav[:, :, : self.max_len - 1]
 
         e1 = self.emb[0](wav[:, 0])
-        e1 = torch.cat(
-            (self.EOT_emb.unsqueeze(0).repeat(B, 1, 1), e1), dim=1
-        )
+        e1 = torch.cat((self.EOT_emb.unsqueeze(0).repeat(B, 1, 1), e1), dim=1)
         e2 = sum(self.emb[k](wav[:, k]) for k in range(1, self.code_depth))
-        e2 = torch.cat(
-            (self.layer2_EOT_emb.unsqueeze(0).repeat(B, 1, 1), e2), dim=1
-        )
+        e2 = torch.cat((self.layer2_EOT_emb.unsqueeze(0).repeat(B, 1, 1), e2), dim=1)
 
         lengths = lengths + 1
         lengths = torch.clamp(lengths, max=self.max_len)
@@ -405,50 +392,46 @@ class ConditionerProvider(nn.Module):
     ``conditioners.<name>.<param>`` under the parent prefix.
     """
 
-    def __init__(self, conditioners: Dict[str, BaseConditioner]):
+    def __init__(self, conditioners: dict[str, BaseConditioner]):
         super().__init__()
         self.conditioners = nn.ModuleDict(conditioners)
 
     @property
-    def text_conditions(self) -> List[str]:
+    def text_conditions(self) -> list[str]:
         return [k for k, v in self.conditioners.items() if isinstance(v, TextConditioner)]
 
     @property
-    def audio_conditions(self) -> List[str]:
+    def audio_conditions(self) -> list[str]:
         return [k for k, v in self.conditioners.items() if isinstance(v, AudioConditioner)]
 
     @property
     def has_audio_condition(self) -> bool:
         return len(self.audio_conditions) > 0
 
-    def tokenize(self, inputs: List[ConditioningAttributes]) -> Dict[str, Any]:
+    def tokenize(self, inputs: list[ConditioningAttributes]) -> dict[str, Any]:
         assert all(isinstance(x, ConditioningAttributes) for x in inputs)
-        output: Dict[str, Any] = {}
+        output: dict[str, Any] = {}
         text = self._collate_text(inputs)
         audios = self._collate_audios(inputs)
         for attribute, batch in chain(text.items(), audios.items()):
             output[attribute] = self.conditioners[attribute].tokenize(batch)
         return output
 
-    def forward(self, tokenized: Dict[str, Any]) -> Dict[str, ConditionType]:
-        output: Dict[str, ConditionType] = {}
+    def forward(self, tokenized: dict[str, Any]) -> dict[str, ConditionType]:
+        output: dict[str, ConditionType] = {}
         for attribute, inputs in tokenized.items():
             e1, e2, mask = self.conditioners[attribute](inputs)
             output[attribute] = (e1, e2, mask)
         return output
 
-    def _collate_text(
-        self, samples: List[ConditioningAttributes]
-    ) -> Dict[str, List[Optional[str]]]:
-        out: Dict[str, List[Optional[str]]] = defaultdict(list)
+    def _collate_text(self, samples: list[ConditioningAttributes]) -> dict[str, list[str | None]]:
+        out: dict[str, list[str | None]] = defaultdict(list)
         for s in samples:
             for cond in self.text_conditions:
                 out[cond].append(s.text.get(cond))
         return out
 
-    def _collate_audios(
-        self, samples: List[ConditioningAttributes]
-    ) -> Dict[str, AudioCondition]:
+    def _collate_audios(self, samples: list[ConditioningAttributes]) -> dict[str, AudioCondition]:
         # For inference we always pass a pre-batched ``AudioCondition``
         # (B==1 at the sample level); when there are multiple samples
         # (CFG pair, multi-request) we stack the ``wav`` tensors along
@@ -456,7 +439,7 @@ class ConditionerProvider(nn.Module):
         # ``collate(wavs[attribute])`` flattens then pads, which is
         # heavyweight; for v2 inference each ``wav`` is already the same
         # length so a simple cat suffices.
-        out: Dict[str, AudioCondition] = {}
+        out: dict[str, AudioCondition] = {}
         if not self.audio_conditions:
             return out
         for attribute in self.audio_conditions:
@@ -531,11 +514,11 @@ class ClassifierFreeGuidanceDropoutInference(nn.Module):
 
     def forward(
         self,
-        samples: List[ConditioningAttributes],
-        condition_types: List[str] = ("audio", "text"),
-        customized: Optional[List[str]] = None,  # unused at inference for v2
+        samples: list[ConditioningAttributes],
+        condition_types: list[str] = ("audio", "text"),
+        customized: list[str] | None = None,  # unused at inference for v2
         code_size: int = 16384,
-    ) -> List[ConditioningAttributes]:
+    ) -> list[ConditioningAttributes]:
         new_samples = deepcopy(samples)
         for sample in new_samples:
             for kind in condition_types:
@@ -569,7 +552,7 @@ DEFAULT_STRUCTURE_VOCAB: tuple = (
 
 def _resolve_token_path_in_model_args(
     model_args: dict,
-    upstream_repo_path: Optional[str],
+    upstream_repo_path: str | None,
 ) -> None:
     """Join relative ``token_path`` values against the SongGeneration repo root."""
     token_path = model_args.get("token_path")
@@ -585,10 +568,10 @@ def _resolve_token_path_in_model_args(
 def build_conditioner_provider(
     config,
     *,
-    structure_vocab: Optional[List[str]] = None,
-    upstream_repo_path: Optional[str] = None,
+    structure_vocab: list[str] | None = None,
+    upstream_repo_path: str | None = None,
     version: str = "v2",
-) -> "ConditionerProvider":
+) -> ConditionerProvider:
     """Construct :class:`ConditionerProvider` from ``config.conditioners``.
 
     Same branching as upstream ``codeclm/models/builders.py:get_conditioner_provider``:

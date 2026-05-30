@@ -9,14 +9,12 @@ Prepends/sums condition embeddings into the input sequence.
 from __future__ import annotations
 
 from copy import deepcopy
-from typing import Dict, List, Tuple
 
 import torch
 import torch.nn as nn
 
-
 # (input1 cond emb, input2 cond emb, mask). Reference uses the same shape.
-ConditionType = Tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+ConditionType = tuple[torch.Tensor, torch.Tensor, torch.Tensor]
 
 
 class ConditionFuser(nn.Module):
@@ -30,12 +28,12 @@ class ConditionFuser(nn.Module):
 
     FUSING_METHODS = ("sum", "prepend")
 
-    def __init__(self, fuse2cond: Dict[str, List[str]]):
+    def __init__(self, fuse2cond: dict[str, list[str]]):
         super().__init__()
         for k in fuse2cond:
             assert k in self.FUSING_METHODS, f"unknown fuse op: {k}"
-        self.fuse2cond: Dict[str, List[str]] = fuse2cond
-        self.cond2fuse: Dict[str, str] = {}
+        self.fuse2cond: dict[str, list[str]] = fuse2cond
+        self.cond2fuse: dict[str, str] = {}
         for fuse_method, conditions in fuse2cond.items():
             for condition in conditions:
                 self.cond2fuse[condition] = fuse_method
@@ -44,10 +42,10 @@ class ConditionFuser(nn.Module):
         self,
         input1: torch.Tensor,
         input2: torch.Tensor,
-        conditions: Dict[str, ConditionType],
+        conditions: dict[str, ConditionType],
         *,
         first_step: bool,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """Prepend / sum conditions onto both transformer inputs.
 
         Args:
@@ -63,8 +61,7 @@ class ConditionFuser(nn.Module):
             If ``prepend`` fires, the sequence dim grows by ``sum(T_cond)``.
         """
         assert set(conditions.keys()).issubset(set(self.cond2fuse.keys())), (
-            f"unknown conditions: expected subset of {set(self.cond2fuse.keys())}, "
-            f"got {set(conditions.keys())}"
+            f"unknown conditions: expected subset of {set(self.cond2fuse.keys())}, got {set(conditions.keys())}"
         )
 
         fused_input_1 = input1

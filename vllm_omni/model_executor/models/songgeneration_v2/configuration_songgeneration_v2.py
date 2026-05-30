@@ -186,7 +186,7 @@ class SongGenerationV2LeLMConfig(PretrainedConfig):
             },
         }
 
-    def get_text_config(self, **kwargs: Any) -> "SongGenerationV2LeLMConfig":
+    def get_text_config(self, **kwargs: Any) -> SongGenerationV2LeLMConfig:
         return self
 
 
@@ -239,7 +239,7 @@ class SongGenerationV2Flow1dVAESeparateConfig(PretrainedConfig):
         self.vocal_replacement_token_id = vocal_replacement_token_id
         self.bgm_replacement_token_id = bgm_replacement_token_id
 
-    def get_text_config(self, **kwargs: Any) -> "SongGenerationV2Flow1dVAESeparateConfig":
+    def get_text_config(self, **kwargs: Any) -> SongGenerationV2Flow1dVAESeparateConfig:
         return self
 
 

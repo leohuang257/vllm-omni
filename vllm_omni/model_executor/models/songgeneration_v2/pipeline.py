@@ -8,7 +8,6 @@ from vllm_omni.config.stage_config import (
     StagePipelineConfig,
 )
 
-
 # Stage-input processor module path.
 _PROC = "vllm_omni.model_executor.stage_input_processors.songgeneration_v2"
 
@@ -32,9 +31,7 @@ SONGGENERATION_V2_PIPELINE = PipelineConfig(
             owns_tokenizer=True,
             tokenizer_subdir="third_party/Qwen2-7B",
             engine_output_type="codes",
-            async_chunk_process_next_stage_input_func=(
-                f"{_PROC}.lelm_to_flow1dvae_async_chunk"
-            ),
+            async_chunk_process_next_stage_input_func=(f"{_PROC}.lelm_to_flow1dvae_async_chunk"),
             sampling_constraints={
                 "detokenize": False,
                 "stop_token_ids": [16384],

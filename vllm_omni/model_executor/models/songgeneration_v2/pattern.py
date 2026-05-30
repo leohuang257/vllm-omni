@@ -11,7 +11,6 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import List, Optional, Union
 
 import numpy as np
 import torch
@@ -25,7 +24,7 @@ class LayoutCoord:
     q: int
 
 
-PatternLayout = List[List[LayoutCoord]]
+PatternLayout = list[list[LayoutCoord]]
 
 
 class Pattern:
@@ -43,18 +42,14 @@ class Pattern:
         self.layout = layout
         self._valid_layout = [seq for seq in layout if all(c.t < timesteps for c in seq)]
         # cache scatter-index builds; lengths are the same across calls
-        self._build_pattern_sequence_scatter_indexes = lru_cache(100)(
-            self._build_pattern_sequence_scatter_indexes
-        )
-        self._build_reverted_sequence_scatter_indexes = lru_cache(100)(
-            self._build_reverted_sequence_scatter_indexes
-        )
+        self._build_pattern_sequence_scatter_indexes = lru_cache(100)(self._build_pattern_sequence_scatter_indexes)
+        self._build_reverted_sequence_scatter_indexes = lru_cache(100)(self._build_reverted_sequence_scatter_indexes)
 
     @property
     def valid_layout(self) -> PatternLayout:
         return self._valid_layout
 
-    def get_sequence_coords_with_timestep(self, t: int, q: Optional[int] = None):
+    def get_sequence_coords_with_timestep(self, t: int, q: int | None = None):
         coords = []
         for s, seq_codes in enumerate(self.layout):
             for code in seq_codes:
@@ -62,10 +57,10 @@ class Pattern:
                     coords.append((s, code))
         return coords
 
-    def get_steps_with_timestep(self, t: int, q: Optional[int] = None) -> List[int]:
+    def get_steps_with_timestep(self, t: int, q: int | None = None) -> list[int]:
         return [step for step, _ in self.get_sequence_coords_with_timestep(t, q)]
 
-    def get_first_step_with_timesteps(self, t: int, q: Optional[int] = None) -> Optional[int]:
+    def get_first_step_with_timesteps(self, t: int, q: int | None = None) -> int | None:
         steps = self.get_steps_with_timestep(t, q)
         return steps[0] if steps else None
 
@@ -74,11 +69,9 @@ class Pattern:
         timesteps: int,
         code_depth: int,
         keep_only_valid_steps: bool,
-        device: Union[torch.device, str] = "cpu",
+        device: torch.device | str = "cpu",
     ):
-        assert code_depth == self.code_depth, (
-            f"codebook mismatch: {code_depth} != {self.code_depth}"
-        )
+        assert code_depth == self.code_depth, f"codebook mismatch: {code_depth} != {self.code_depth}"
         assert timesteps <= self.timesteps
         ref_layout = self.valid_layout if keep_only_valid_steps else self.layout
         indexes = np.zeros((code_depth, len(ref_layout)), dtype=np.int64)
@@ -108,7 +101,7 @@ class Pattern:
         code_depth: int,
         keep_only_valid_steps: bool = False,
         is_model_output: bool = False,
-        device: Union[torch.device, str] = "cpu",
+        device: torch.device | str = "cpu",
     ):
         ref_layout = self.valid_layout if keep_only_valid_steps else self.layout
         timesteps = self.timesteps
@@ -171,7 +164,7 @@ class DelayedPatternProvider(CodebooksPatternProvider):
     def __init__(
         self,
         code_depth: int,
-        delays: Optional[List[int]] = None,
+        delays: list[int] | None = None,
         flatten_first: int = 0,
         empty_initial: int = 0,
     ):

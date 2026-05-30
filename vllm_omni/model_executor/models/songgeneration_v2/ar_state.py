@@ -9,7 +9,6 @@ Stream 0 is driven by vLLM; streams 1+2 are driven internally by transformer2.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, List, Optional
 
 import torch
 
@@ -22,7 +21,7 @@ class ArState:
 
     # --- Pattern ---
     pattern: Pattern
-    delays: List[int]
+    delays: list[int]
     code_depth: int
     code_size: int
     special_token_id: int
@@ -47,9 +46,9 @@ class ArState:
         code_depth: int,
         code_size: int,
         max_gen_len: int,
-        delays: List[int],
+        delays: list[int],
         device: torch.device = torch.device("cpu"),
-    ) -> "ArState":
+    ) -> ArState:
         """Initialize state for a new generation request."""
         provider = DelayedPatternProvider(
             code_depth=code_depth,
@@ -81,7 +80,7 @@ class ArState:
         )
 
     @property
-    def active_streams(self) -> List[int]:
+    def active_streams(self) -> list[int]:
         """Which streams are active at the current step."""
         active = []
         for q, delay in enumerate(self.delays):
@@ -170,8 +169,7 @@ class ArState:
         max_delay = max(self.delays)
 
         if t_actual <= max_delay:
-            return torch.empty(0, self.code_depth, dtype=torch.long,
-                               device=self.gen_codes.device)
+            return torch.empty(0, self.code_depth, dtype=torch.long, device=self.gen_codes.device)
 
         t_out = t_actual - max_delay
         out = self.gen_codes[:, :t_out].clone()

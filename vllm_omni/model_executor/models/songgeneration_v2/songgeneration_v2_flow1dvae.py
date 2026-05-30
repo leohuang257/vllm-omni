@@ -12,7 +12,7 @@ from __future__ import annotations
 import os
 import sys
 from collections.abc import Iterable
-from typing import Any, Optional
+from typing import Any
 
 import torch
 import torch.nn as nn
@@ -30,7 +30,7 @@ from .runtime_assets import RUNTIME_REPO_ENV, resolve_songgeneration_runtime_ass
 logger = init_logger(__name__)
 
 
-def _resolve_upstream_repo(explicit: Optional[str] = None) -> str:
+def _resolve_upstream_repo(explicit: str | None = None) -> str:
     """Resolve the upstream SongGeneration repo path.
 
     Priority: SONGGENERATION_REPO env var > explicit model path if it contains
@@ -68,7 +68,7 @@ def _strip_audio_tokenizer_prefix(checkpoint_field: str) -> str:
     """Strip the `Flow1dVAESeparate_` dispatch prefix used in config.yaml."""
     prefix = "Flow1dVAESeparate_"
     if checkpoint_field.startswith(prefix):
-        return checkpoint_field[len(prefix):]
+        return checkpoint_field[len(prefix) :]
     return checkpoint_field
 
 
@@ -148,6 +148,7 @@ class SongGenerationV2Flow1dVAESeparateDecoder(nn.Module):
         _ensure_upstream_on_path(self.upstream_repo_path)
 
         from .upstream_transformers_compat import ensure_upstream_transformers_compat
+
         ensure_upstream_transformers_compat()
 
         from generate_septoken import Tango  # type: ignore
@@ -167,8 +168,7 @@ class SongGenerationV2Flow1dVAESeparateDecoder(nn.Module):
         ]:
             if not os.path.exists(p):
                 raise FileNotFoundError(
-                    f"SongGeneration v2 {label} not found at {p}. "
-                    f"Set SONGGENERATION_REPO or pass upstream_repo_path."
+                    f"SongGeneration v2 {label} not found at {p}. Set SONGGENERATION_REPO or pass upstream_repo_path."
                 )
 
         self._tango = Tango(
@@ -202,11 +202,11 @@ class SongGenerationV2Flow1dVAESeparateDecoder(nn.Module):
     @torch.no_grad()
     def forward(
         self,
-        input_ids: Optional[torch.Tensor] = None,
-        positions: Optional[torch.Tensor] = None,
+        input_ids: torch.Tensor | None = None,
+        positions: torch.Tensor | None = None,
         intermediate_tensors: Any = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
-        runtime_additional_information: Optional[list[dict[str, Any]]] = None,
+        inputs_embeds: torch.Tensor | None = None,
+        runtime_additional_information: list[dict[str, Any]] | None = None,
         **kwargs: Any,
     ) -> OmniOutput:
         """Decode stream-major codec tokens into stereo 48kHz audio.
@@ -270,7 +270,8 @@ class SongGenerationV2Flow1dVAESeparateDecoder(nn.Module):
                 else:
                     logger.warning(
                         "left_context trim %d >= decoded length %d; returning empty",
-                        samples_to_cut, wav.shape[-1],
+                        samples_to_cut,
+                        wav.shape[-1],
                     )
                     wav = empty
 
@@ -290,8 +291,8 @@ class SongGenerationV2Flow1dVAESeparateDecoder(nn.Module):
         codes: torch.Tensor,
         *,
         gen_type: str = "mixed",
-        prompt_vocal_wav: Optional[torch.Tensor] = None,
-        prompt_bgm_wav: Optional[torch.Tensor] = None,
+        prompt_vocal_wav: torch.Tensor | None = None,
+        prompt_bgm_wav: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Decode [1, K, T] codes to stereo waveform via Tango.code2sound.
 
@@ -301,9 +302,7 @@ class SongGenerationV2Flow1dVAESeparateDecoder(nn.Module):
         self._ensure_codec_loaded()
         assert self._tango is not None
 
-        assert codes.dim() == 3 and codes.size(1) >= 3, (
-            f"expected [B, K>=3, T] codes; got {tuple(codes.shape)}"
-        )
+        assert codes.dim() == 3 and codes.size(1) >= 3, f"expected [B, K>=3, T] codes; got {tuple(codes.shape)}"
         codes_vocal = codes[:, [1], :]
         codes_bgm = codes[:, [2], :]
 
@@ -353,8 +352,8 @@ class SongGenerationV2Flow1dVAESeparateDecoder(nn.Module):
     def _split_requests(
         self,
         ids: torch.Tensor,
-        K: int,
-        seq_token_counts: Optional[list[int]],
+        code_depth: int,
+        seq_token_counts: list[int] | None,
     ) -> list[torch.Tensor]:
         """Split flat input_ids into per-request [1, K, T] tensors."""
         ids = ids.reshape(-1).to(torch.long)
@@ -366,13 +365,11 @@ class SongGenerationV2Flow1dVAESeparateDecoder(nn.Module):
 
         out: list[torch.Tensor] = []
         for i, count in enumerate(seq_token_counts):
-            slab = ids[boundaries[i]: boundaries[i] + count]
-            if slab.numel() == 0 or slab.numel() % K != 0:
-                raise ValueError(
-                    f"request {i}: {slab.numel()} codes not divisible by code_depth={K}"
-                )
-            T = slab.numel() // K
-            out.append(slab.view(1, K, T))
+            slab = ids[boundaries[i] : boundaries[i] + count]
+            if slab.numel() == 0 or slab.numel() % code_depth != 0:
+                raise ValueError(f"request {i}: {slab.numel()} codes not divisible by code_depth={code_depth}")
+            T = slab.numel() // code_depth
+            out.append(slab.view(1, code_depth, T))
         return out
 
 

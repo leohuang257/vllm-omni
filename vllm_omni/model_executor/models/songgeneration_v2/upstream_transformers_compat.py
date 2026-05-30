@@ -14,7 +14,7 @@ import sys
 import types
 from collections.abc import Callable
 from math import ceil
-from typing import Any, List, Optional, Set, Tuple
+from typing import Any
 
 import torch
 import torch.nn as nn
@@ -54,6 +54,7 @@ def _ensure_transformers_onnx_stub() -> None:
         return
     try:
         import transformers.onnx as _onnx  # noqa: F401
+
         return
     except ModuleNotFoundError:
         pass
@@ -88,19 +89,14 @@ def _ensure_sequence_summary() -> None:
 
             self.summary: nn.Module = nn.Identity()
             if getattr(config, "summary_use_proj", False):
-                if (
-                    getattr(config, "summary_proj_to_labels", False)
-                    and getattr(config, "num_labels", 0) > 0
-                ):
+                if getattr(config, "summary_proj_to_labels", False) and getattr(config, "num_labels", 0) > 0:
                     num_classes = config.num_labels
                 else:
                     num_classes = config.hidden_size
                 self.summary = nn.Linear(config.hidden_size, num_classes)
 
             activation_string = getattr(config, "summary_activation", None)
-            self.activation: Callable = (
-                get_activation(activation_string) if activation_string else nn.Identity()
-            )
+            self.activation: Callable = get_activation(activation_string) if activation_string else nn.Identity()
 
             self.first_dropout: nn.Module = nn.Identity()
             if getattr(config, "summary_first_dropout", 0) > 0:
@@ -113,7 +109,7 @@ def _ensure_sequence_summary() -> None:
         def forward(
             self,
             hidden_states: torch.Tensor,
-            cls_index: Optional[torch.LongTensor] = None,
+            cls_index: torch.LongTensor | None = None,
         ) -> torch.Tensor:
             if self.summary_type == "last":
                 output = hidden_states[:, -1]
@@ -130,9 +126,7 @@ def _ensure_sequence_summary() -> None:
                     )
                 else:
                     cls_index = cls_index.unsqueeze(-1).unsqueeze(-1)
-                    cls_index = cls_index.expand(
-                        (-1,) * (cls_index.dim() - 1) + (hidden_states.size(-1),)
-                    )
+                    cls_index = cls_index.expand((-1,) * (cls_index.dim() - 1) + (hidden_states.size(-1),))
                 output = hidden_states.gather(-2, cls_index).squeeze(-2)
             else:
                 raise NotImplementedError(self.summary_type)
@@ -173,11 +167,11 @@ def _ensure_pytorch_utils_pruning_helpers() -> None:
         return new_layer
 
     def find_pruneable_heads_and_indices(
-        heads: List[int],
+        heads: list[int],
         n_heads: int,
         head_size: int,
-        already_pruned_heads: Set[int],
-    ) -> Tuple[Set[int], torch.LongTensor]:
+        already_pruned_heads: set[int],
+    ) -> tuple[set[int], torch.LongTensor]:
         mask = torch.ones(n_heads, head_size)
         heads_set = set(heads) - already_pruned_heads
         for head in heads_set:
@@ -208,17 +202,11 @@ def _ensure_model_parallel_utils_module() -> None:
         missing_blocks = [i for i in blocks if i not in device_map_blocks]
         extra_blocks = [i for i in device_map_blocks if i not in blocks]
         if duplicate_blocks:
-            raise ValueError(
-                "Duplicate attention blocks specified in device_map: " + str(duplicate_blocks)
-            )
+            raise ValueError("Duplicate attention blocks specified in device_map: " + str(duplicate_blocks))
         if missing_blocks:
-            raise ValueError(
-                "Attention blocks not in device_map: " + str(missing_blocks)
-            )
+            raise ValueError("Attention blocks not in device_map: " + str(missing_blocks))
         if extra_blocks:
-            raise ValueError(
-                "device_map has extra attention blocks: " + str(extra_blocks)
-            )
+            raise ValueError("device_map has extra attention blocks: " + str(extra_blocks))
 
     def get_device_map(n_layers, devices):  # noqa: ANN001
         layers = list(range(n_layers))
@@ -253,7 +241,7 @@ def _ensure_pretrained_model_legacy_helpers() -> None:
 
     def get_head_mask(
         self,
-        head_mask: Optional[torch.Tensor],
+        head_mask: torch.Tensor | None,
         num_hidden_layers: int,
         is_attention_chunked: bool = False,
     ) -> Any:
@@ -276,7 +264,7 @@ def _ensure_pretrained_model_legacy_helpers() -> None:
     def warn_if_padding_and_no_attention_mask(
         self,
         input_ids: torch.Tensor,
-        attention_mask: Optional[torch.Tensor],
+        attention_mask: torch.Tensor | None,
     ) -> None:
         del self, input_ids, attention_mask
 

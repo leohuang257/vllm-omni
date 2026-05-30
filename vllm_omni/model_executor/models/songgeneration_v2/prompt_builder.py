@@ -8,17 +8,14 @@ CFG-paired condition tensors. Single entry point: build_condition_tensors().
 
 from __future__ import annotations
 
-from typing import Any, List, Optional, Tuple
-
 import torch
 
 from .conditioners import (
     AudioCondition,
     ClassifierFreeGuidanceDropoutInference,
-    ConditioningAttributes,
     ConditionerProvider,
+    ConditioningAttributes,
 )
-
 
 # Default token IDs for SongGeneration v2-large
 # (upstream conf/vocab.yaml). The real values used at
@@ -26,11 +23,11 @@ from .conditioners import (
 # below, so unit tests can use smaller dims; these constants are only the
 # fallback for callers that pass no provider.
 _DEFAULT_CODE_SIZE = 16384
-_DEFAULT_EOS_TOKEN_ID = _DEFAULT_CODE_SIZE          # 16384
+_DEFAULT_EOS_TOKEN_ID = _DEFAULT_CODE_SIZE  # 16384
 _DEFAULT_SPECIAL_TOKEN_ID = _DEFAULT_CODE_SIZE + 1  # 16385
 
 
-def _resolve_token_ids(provider: "ConditionerProvider") -> Tuple[int, int]:
+def _resolve_token_ids(provider: ConditionerProvider) -> tuple[int, int]:
     """Read ``(eos_id, special_id)`` from the prompt_audio conditioner.
 
     Falls back to the v2-large defaults if no prompt_audio conditioner is
@@ -44,11 +41,11 @@ def _resolve_token_ids(provider: "ConditionerProvider") -> Tuple[int, int]:
 
 
 def _preprocess_description(
-    descriptions: Optional[str],
+    descriptions: str | None,
     *,
     gen_type: str = "mixed",
     version: str = "v2",
-) -> Optional[str]:
+) -> str | None:
     """Match upstream ``generate.py:319-326`` description preprocessing."""
     if version == "v1":
         return descriptions.lower() if descriptions else None
@@ -62,12 +59,20 @@ def _preprocess_description(
     return "[Musicality-very-high], " + base
 
 
+def _preprocess_lyric(lyric: str | None, *, gen_type: str = "mixed") -> str | None:
+    """Match upstream ``generate.py:260``: force ``lyrics='.'`` for bgm so the
+    AR stage generates a pure-music sequence instead of a masked-out melody."""
+    if gen_type == "bgm":
+        return "."
+    return lyric
+
+
 def _mask_prompt_tokens(
     audio_qt_emb: torch.Tensor,
     *,
     eos_id: int,
     special_id: int,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor]:
     """Prepend an EOS row and re-apply the absent-stream mask.
 
     Mirrors ``LmModel.prepare_condition_tensors`` lyrically: if the first
@@ -86,9 +91,7 @@ def _mask_prompt_tokens(
         ``[B]`` sequence length used by the conditioner mask.
     """
     if audio_qt_emb.dim() != 3:
-        raise ValueError(
-            f"audio_qt_emb must be [B, code_depth, T_prompt]; got {tuple(audio_qt_emb.shape)}"
-        )
+        raise ValueError(f"audio_qt_emb must be [B, code_depth, T_prompt]; got {tuple(audio_qt_emb.shape)}")
 
     audio_qt_emb = audio_qt_emb.long()
     B, K, T = audio_qt_emb.shape
@@ -98,9 +101,7 @@ def _mask_prompt_tokens(
 
     # Prepend an EOS frame on every sample so the conditioner has a fixed
     # leading row to anchor on.
-    eos_frame = torch.full(
-        (B, K, 1), eos_id, dtype=audio_qt_emb.dtype, device=audio_qt_emb.device
-    )
+    eos_frame = torch.full((B, K, 1), eos_id, dtype=audio_qt_emb.dtype, device=audio_qt_emb.device)
     audio_qt_seq = torch.cat([eos_frame, audio_qt_emb], dim=-1)
 
     # Re-stamp absent streams with the special id so the conditioner's
@@ -115,15 +116,15 @@ def _mask_prompt_tokens(
 def build_condition_tensors(
     provider: ConditionerProvider,
     *,
-    lyrics: List[Optional[str]],
-    descriptions: Optional[List[Optional[str]]] = None,
-    prompt_audio_codes: Optional[torch.Tensor] = None,
+    lyrics: list[str | None],
+    descriptions: list[str | None] | None = None,
+    prompt_audio_codes: torch.Tensor | None = None,
     sample_rate: int = 48000,
     gen_type: str = "mixed",
     version: str = "v2",
     cfg_pair: bool = True,
-    device: Optional[torch.device | str] = None,
-) -> Tuple[dict, int]:
+    device: torch.device | str | None = None,
+) -> tuple[dict, int]:
     """Build a CFG-paired ``condition_tensors`` dict from raw user inputs.
 
     Args:
@@ -166,31 +167,23 @@ def build_condition_tensors(
     if descriptions is None:
         descriptions = [None] * B
     elif len(descriptions) != B:
-        raise ValueError(
-            f"descriptions length ({len(descriptions)}) must match lyrics length ({B})"
-        )
+        raise ValueError(f"descriptions length ({len(descriptions)}) must match lyrics length ({B})")
 
     if prompt_audio_codes is not None:
         if prompt_audio_codes.dim() != 3:
-            raise ValueError(
-                f"prompt_audio_codes must be [B, code_depth, T]; got {tuple(prompt_audio_codes.shape)}"
-            )
+            raise ValueError(f"prompt_audio_codes must be [B, code_depth, T]; got {tuple(prompt_audio_codes.shape)}")
         if prompt_audio_codes.shape[0] != B:
-            raise ValueError(
-                f"prompt_audio_codes batch ({prompt_audio_codes.shape[0]}) != lyrics batch ({B})"
-            )
+            raise ValueError(f"prompt_audio_codes batch ({prompt_audio_codes.shape[0]}) != lyrics batch ({B})")
 
     # ---- Build per-sample ConditioningAttributes ---------------------
     available = set(provider.conditioners.keys())
-    samples: List[ConditioningAttributes] = []
+    samples: list[ConditioningAttributes] = []
     for i in range(B):
         attr = ConditioningAttributes()
         if "description" in available:
-            attr.text["description"] = lyrics[i]
+            attr.text["description"] = _preprocess_lyric(lyrics[i], gen_type=gen_type)
         if "type_info" in available:
-            attr.text["type_info"] = _preprocess_description(
-                descriptions[i], gen_type=gen_type, version=version
-            )
+            attr.text["type_info"] = _preprocess_description(descriptions[i], gen_type=gen_type, version=version)
         if "prompt_audio" in available:
             # Per-sample prompt tokens. ``prompt_audio_codes`` is either
             # explicit (shape ``[B,3,T]``) or ``None`` -> single-frame
@@ -212,9 +205,7 @@ def build_condition_tensors(
     if "prompt_audio" in available and prompt_audio_codes is not None:
         for i, s in enumerate(samples):
             ac = s.audio["prompt_audio"]
-            qt_seq, length = _mask_prompt_tokens(
-                ac.wav, eos_id=eos_id, special_id=special_id
-            )
+            qt_seq, length = _mask_prompt_tokens(ac.wav, eos_id=eos_id, special_id=special_id)
             s.audio["prompt_audio"] = AudioCondition(
                 wav=qt_seq,
                 length=length.to(device),
