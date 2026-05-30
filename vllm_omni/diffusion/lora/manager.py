@@ -367,9 +367,7 @@ class DiffusionLoRAManager:
         )
 
         # Default denoising components plus any a pipeline opts into via
-        # ``_lora_components`` (e.g. SenseNova-U1's ``language_model``); the opt-in
-        # leaves other pipelines unchanged. Not reusing ``_dit_modules``: it may hold
-        # dotted paths (e.g. ``pipe.transformer``) that this scan can't resolve.
+        # ``_lora_components`` (opt-in; other pipelines unchanged).
         default_components = ("transformer", "transformer_2", "dit", "bagel")
         extra_components = tuple(getattr(self.pipeline, "_lora_components", ()) or ())
         for component_name in (*default_components, *extra_components):
