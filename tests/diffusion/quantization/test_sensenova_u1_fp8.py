@@ -162,7 +162,13 @@ def test_und_and_gen_layers_both_present():
 
 
 def test_gen_only_wrapper_delegates_attributes():
-    """_GenOnlyQuantConfig should delegate attribute access to the inner config."""
+    """The wrapper reports a non-uniform name but delegates other attrs.
+
+    - ``get_name()`` -> ``"fp8_gen_only"``: custom, so introspection reflects
+      that FP8 is applied only to the gen path (not a uniform ``"fp8"`` config).
+    - ``activation_scheme``: not customized, so it falls through to the inner
+      FP8 config via ``__getattr__`` unchanged.
+    """
     from vllm_omni.diffusion.models.sensenova_u1.pipeline_sensenova_u1 import (
         _GenOnlyQuantConfig,
     )
@@ -171,5 +177,6 @@ def test_gen_only_wrapper_delegates_attributes():
     inner = build_quant_config("fp8")
     wrapper = _GenOnlyQuantConfig(inner)
 
-    assert wrapper.get_name() == "fp8"
+    assert inner.get_name() == "fp8"
+    assert wrapper.get_name() == "fp8_gen_only"
     assert wrapper.activation_scheme == inner.activation_scheme

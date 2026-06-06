@@ -497,14 +497,27 @@ class _GenOnlyQuantConfig:
     (``qkv_proj_mot_gen``, ``mlp_mot_gen``).  The RFC requires FP8 only on the
     gen-path GEMMs during denoising; und-path layers stay in BF16.
 
-    This is *not* a full ``QuantizationConfig`` subclass — it only needs to
-    satisfy the duck-typed interface that ``LinearBase.__init__`` uses:
-    ``get_quant_method(layer, prefix)``.  The outer registry and weight-loader
-    still operate on the original config stored in ``od_config.quantization_config``.
+    Duck-typed adapter (not a ``QuantizationConfig`` subclass): ``get_name`` and
+    ``get_quant_method`` are custom; everything else delegates to the inner config
+    via ``__getattr__``. It is attached only to this model's ``language_model``
+    and is consumed solely through ``get_quant_method`` by ``LinearBase``; the
+    global weight-loader/registry use the original config in
+    ``od_config.quantization_config``, not this wrapper.
+
+    The quantization is intentionally non-uniform: ``get_quant_method`` is
+    prefix-dependent (inner FP8 only for ``mot_gen`` layers, BF16 elsewhere).
+    ``get_name`` therefore reports ``"fp8_gen_only"`` instead of delegating to the
+    inner ``"fp8"``, so introspection/logging reflect that this is not a uniform
+    FP8 config. This name is a local descriptor only — it is not registered in
+    ``QuantizationMethods``, so do not feed it back into any name-based registry
+    lookup.
     """
 
     def __init__(self, inner: QuantizationConfig):
         self._inner = inner
+
+    def get_name(self) -> str:
+        return "fp8_gen_only"
 
     def get_quant_method(self, layer, prefix: str = ""):
         from vllm.model_executor.layers.linear import UnquantizedLinearMethod
