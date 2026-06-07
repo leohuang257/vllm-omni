@@ -37,6 +37,18 @@ pip install \
 > and `huggingface-hub==0.25.2`, which conflict with and would downgrade the
 > versions vLLM-Omni requires. Install only the leaf audio packages above.
 
+> **Restore `protobuf` / `numpy` after installing.** Some leaf packages
+> (e.g. `descript-audiotools`) pull in `protobuf<3.20` and `numpy<2`, which
+> downgrade the versions vLLM requires. After the install above, pin them
+> back so vLLM keeps working:
+>
+> ```bash
+> pip install "protobuf>=5.29.6,!=6.30.*,!=6.31.*,!=6.32.*,!=6.33.*"
+> ```
+>
+> (`numpy` 1.26.x is fine for both the upstream stack and vLLM at runtime;
+> only `protobuf` needs restoring.)
+
 ### 3. Add a root `config.json`
 
 Omni resolves the model type from a `config.json` at the repo root, but the
@@ -54,6 +66,10 @@ EOF
 Without it, `Omni(...)` fails with `Could not determine model_type`.
 
 ## Quick Start
+
+```bash
+source /path/to/vllm-omni/.venv/bin/activate
+```
 
 ```bash
 # Option 1: Pass path directly
@@ -118,3 +134,28 @@ Stage 1 wraps upstream Flow1dVAE/Tango runtime assets. Weights and code
 are loaded at runtime from the local SongGeneration repo; vLLM-Omni does
 not vendor upstream weights. A native port can replace the wrapper later
 without changing the stage contract.
+
+## Known constraints
+
+These are **architectural limits of the current integration**, not just
+defaults in the deploy YAML. The pinned `deploy/songgeneration_v2.yaml`
+already respects them; overriding it will break or silently corrupt output.
+
+- **Single request only (`max_num_seqs: 1`).** This is a fundamental
+  concurrency ceiling, not a tuning choice. Stage 0's CFG uncond path is a
+  single HF `LlamaModel` whose `past_key_values` is one attribute that is
+  swapped in/out per request, so concurrent requests cannot be batched on
+  that path. In addition, the stream-0 force-EOS, repetition-penalty, and
+  `audio_codes` concat paths all operate on the whole batch using a single
+  request's state. Stage 0 asserts `max_num_seqs == 1` and raises if more
+  than one request is in flight. Batched decoding would require a per-request
+  null-model pool (or cross-request `past_key_values` batching) and per-row
+  keyed state — future work.
+- **Tensor parallelism unsupported (`tensor_parallel_size: 1`).** The CFG
+  null path and `transformer2` are plain (replicated) HF `LlamaModel`s, and
+  stream-0 logits are hand-computed from the (potentially sharded) lm_head
+  weight. Stage 0 asserts TP == 1.
+- **Synchronous decode only (`async_chunk: false`).** Stage 0 emits the full
+  codec tensor once at finish, not per-step frames, so per-step async-chunk
+  streaming is not wired up. Enabling `async_chunk: true` is rejected at
+  config-merge time.

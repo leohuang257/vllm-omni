@@ -152,6 +152,7 @@ _OMNI_PIPELINES: dict[str, tuple[str, str]] = {
     "songgeneration_v2": (
         "vllm_omni.model_executor.models.songgeneration_v2.pipeline",
         "SONGGENERATION_V2_PIPELINE",
+    ),
     "dynin_omni": (
         "vllm_omni.model_executor.models.dynin_omni.pipeline",
         "DYNIN_OMNI_PIPELINE",

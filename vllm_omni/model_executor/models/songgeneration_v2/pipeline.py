@@ -31,7 +31,9 @@ SONGGENERATION_V2_PIPELINE = PipelineConfig(
             owns_tokenizer=True,
             tokenizer_subdir="third_party/Qwen2-7B",
             engine_output_type="codes",
-            async_chunk_process_next_stage_input_func=(f"{_PROC}.lelm_to_flow1dvae_async_chunk"),
+            # No async-chunk hook: Stage 0 emits the full codec tensor once at
+            # finish (not per-step frames), so async-chunk streaming is
+            # unsupported (merge_pipeline_deploy rejects async_chunk: true).
             sampling_constraints={
                 "detokenize": False,
                 "stop_token_ids": [16384],
@@ -49,7 +51,6 @@ SONGGENERATION_V2_PIPELINE = PipelineConfig(
             model_arch="SongGenerationV2Flow1dVAESeparateDecoder",
             execution_type=StageExecutionType.LLM_GENERATION,
             owns_tokenizer=False,
-            tokenizer_subdir="third_party/Qwen2-7B",
             input_sources=(0,),
             sync_process_input_func=f"{_PROC}.lelm_to_flow1dvae",
             final_output=True,

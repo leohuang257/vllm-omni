@@ -1,5 +1,22 @@
-# SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM-Omni project
+# Licensed under the License Terms of SongGeneration (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://github.com/tencent-ailab/SongGeneration/blob/main/LICENSE
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License. The License Terms of SongGeneration permit
+# academic / research / educational use only and prohibit commercial use.
+# ==============================================================================
+#
+# Copyright (C) 2025 Tencent. All rights reserved.
+# Modifications Copyright contributors to the vLLM-Omni project.
+#
+# Vendored from tencent-ailab/SongGeneration (codeclm/modules/pattern.py),
+# adapted for inference-only use in vLLM-Omni.
 """Delayed codebook pattern for SongGeneration v2 LeLM Stage 0.
 
 Vendored from upstream ``codeclm/modules/pattern.py``.

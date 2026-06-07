@@ -166,6 +166,27 @@ class SongGenerationV2LeLMForConditionalGeneration(nn.Module):
         self.config = config
         self.model_path = vllm_config.model_config.model
 
+        # Tensor parallelism is unsupported: stream-0 logits are computed by
+        # hand from self.lm_head.weight (a local shard under TP>1) and the
+        # null/transformer2 paths are plain replicated HF LlamaModels.
+        tp_size = int(vllm_config.parallel_config.tensor_parallel_size)
+        assert tp_size == 1, (
+            f"SongGenerationV2LeLM only supports tensor_parallel_size == 1; got {tp_size}. "
+            "The CFG/null-path and hand-computed lm_head logits assume an unsharded vocab."
+        )
+
+        # Single-request only: the CFG null path keeps one past_key_values
+        # swapped per request, and the force-EOS / repetition-penalty /
+        # audio_codes paths use one request's state for the whole batch.
+        max_num_seqs = int(vllm_config.scheduler_config.max_num_seqs)
+        if max_num_seqs > 1:
+            raise ValueError(
+                f"SongGenerationV2LeLM currently requires max_num_seqs == 1; got {max_num_seqs}. "
+                "Multi-request batching needs per-row keyed state in compute_logits / "
+                "make_omni_output and a per-request null-model KV pool (see README "
+                "'Known constraints')."
+            )
+
         self.code_depth = int(config.code_depth)
         self.code_size = int(config.code_size) + 1
         self.input_emb_dim = int(config.code_size) + 2
@@ -173,13 +194,19 @@ class SongGenerationV2LeLMForConditionalGeneration(nn.Module):
         self.cfg_coef = float((config.reference_generation_params or {}).get("cfg_coef", 1.5))
         self.top_k_per_stream: list[int] = list(getattr(config, "top_k_per_stream", [5000, 1, 1]))
 
-        # LlamaModel reads hf_config directly from vllm_config.model_config.
-        # When the top-level config is SongGenerationV2Config (composition),
-        # we must substitute the LeLM sub-config so LlamaModel sees the correct
-        # hidden_size / num_hidden_layers / vocab_size / etc.
-        # The upstream config.yaml has "activation: gelu" but that applies only
-        # to the MLP fuser (nn.GELU). The Llama backbone uses silu (standard).
-        # vLLM's LlamaMLP reads hidden_act and only supports silu.
+        # Substitute the LeLM sub-config so LlamaModel sees the right
+        # hidden_size / num_hidden_layers / vocab_size. The backbone uses silu
+        # (upstream builds its Llama with LlamaConfig's default and vLLM's
+        # LlamaMLP only supports silu), so hidden_act is forced below.
+        # config.activation ("gelu") is the MLP fuser's (self.mlp uses nn.GELU);
+        # guard it so a future checkpoint that changes the fuser fails loudly.
+        fuser_act = str(getattr(config, "activation", "gelu")).lower()
+        if fuser_act != "gelu":
+            raise ValueError(
+                "SongGenerationV2LeLM hardcodes a GELU MLP fuser (self.mlp) and a SiLU "
+                f"Llama backbone, but upstream config.activation={fuser_act!r}. Review the "
+                "fuser/backbone activation wiring before running this checkpoint."
+            )
         llama_config = copy.copy(config)
         llama_config.hidden_act = "silu"
         lelm_vllm_config = copy.copy(vllm_config)
@@ -300,36 +327,10 @@ class SongGenerationV2LeLMForConditionalGeneration(nn.Module):
         # Null hidden states from the current forward, consumed in compute_logits
         self._null_hidden_states: torch.Tensor | None = None
 
-        # Disable vLLM fused kernels that produce incorrect outputs for this
-        # model's condition-prefill path (RMSNorm no-op on zero residual,
-        # SiLU activation NaN). Native PyTorch paths are used instead.
-        self._patch_custom_kernels(self.model)
-
-    @staticmethod
-    def _patch_custom_kernels(module: nn.Module) -> None:
-        """Force RMSNorm and activation ops to use native Python paths."""
-        import types
-
-        from vllm.model_executor.custom_op import CustomOp
-        from vllm.model_executor.layers.layernorm import RMSNorm
-
-        def _native_rmsnorm(self_norm, x, residual=None):
-            if residual is not None:
-                x = x + residual
-                residual = x
-            variance = x.to(torch.float32).pow(2).mean(-1, keepdim=True)
-            x = x * torch.rsqrt(variance + self_norm.variance_epsilon)
-            x = x.to(self_norm.weight.dtype) * self_norm.weight
-            if residual is not None:
-                return x, residual
-            return x
-
-        for submodule in module.modules():
-            if isinstance(submodule, RMSNorm):
-                submodule.forward = types.MethodType(_native_rmsnorm, submodule)
-            if isinstance(submodule, CustomOp):
-                if hasattr(submodule, "forward_native"):
-                    submodule._forward_method = submodule.forward_native
+        # No fused-kernel patching: forcing RMSNorm/activation to native paths
+        # was not needed (the claimed NaN/incorrect-output does not reproduce;
+        # it only shifts the AR trajectory, like the attention backend choice),
+        # so this model uses the same kernels as every other model.
 
     @property
     def special_token_id(self) -> int:
@@ -416,7 +417,8 @@ class SongGenerationV2LeLMForConditionalGeneration(nn.Module):
             eos_logits[:, self.eos_token_id] = 0.0
             return eos_logits
 
-        # Use lm_head weight directly (ParallelLMHead.forward raises in v1)
+        # Hand-compute logits from the lm_head weight (CFG needs raw cond/null
+        # logits before combining). Safe because TP == 1 is asserted in __init__.
         lm_weight = self.lm_head.weight  # [vocab, dim]
         cond_logits = torch.nn.functional.linear(hidden_states, lm_weight)
 
@@ -542,6 +544,16 @@ class SongGenerationV2LeLMForConditionalGeneration(nn.Module):
             # Initialize the delayed-pattern AR state machine
             from .ar_state import ArState
 
+            # Defense-in-depth for the single-request constraint (also checked
+            # at engine init): no other request may be in flight.
+            other_active = [r for r in self._ar_states if r != req_id]
+            assert not other_active, (
+                "SongGenerationV2LeLM only supports max_num_seqs == 1; "
+                f"got concurrent requests {other_active + [req_id]}. Batched "
+                "decode is unsupported (CFG/repetition-penalty/EOS/audio_codes "
+                "paths assume a single in-flight request)."
+            )
+
             max_dur = int(self.config.max_position_embeddings)
             max_gen_len = int(info_dict.get("max_gen_len", max_dur * 0.7))
             self._ar_states[req_id] = ArState.create(
@@ -555,15 +567,14 @@ class SongGenerationV2LeLMForConditionalGeneration(nn.Module):
             span_len = input_ids.shape[0]
             cond_len = cond_embeds.shape[0]
             if cond_len != span_len:
-                logger.error(
-                    "[CRITICAL] prompt_token_ids length (%d) != condition_embeds length (%d). "
-                    "Only %d of %d condition tokens will enter PagedAttention! "
-                    "Set prompt_token_ids = [0] * %d to fix.",
-                    span_len,
-                    cond_len,
-                    min(span_len, cond_len),
-                    cond_len,
-                    cond_len,
+                # On a mismatch only min(span_len, cond_len) condition tokens
+                # reach PagedAttention, producing undefined output; not
+                # recoverable, so raise rather than emit garbage audio.
+                raise ValueError(
+                    f"prompt_token_ids length ({span_len}) != condition_embeds length "
+                    f"({cond_len}); only {min(span_len, cond_len)} of {cond_len} condition "
+                    f"tokens would enter PagedAttention. Set prompt_token_ids = [0] * {cond_len} "
+                    "(use compute_condition_prompt_len to size it)."
                 )
             # Return in-vocab input_ids (bookkeeping only; embeddings carry semantics)
             input_ids_out = input_ids.clamp(0, self.code_size - 1)
@@ -1022,7 +1033,10 @@ class SongGenerationV2LeLMForConditionalGeneration(nn.Module):
 
         ckpt_path = self._audiolm_checkpoint_path()
         logger.info("Loading SongGenerationV2LeLM weights from %s", ckpt_path)
-        raw = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+        # weights_only=True: the checkpoint is downloaded from an external repo,
+        # and upstream model.pt is a plain state_dict of tensors, so no
+        # arbitrary-code unpickling is needed.
+        raw = torch.load(ckpt_path, map_location="cpu", weights_only=True)
         if isinstance(raw, dict) and "state_dict" in raw:
             raw = raw["state_dict"]
 
@@ -1086,6 +1100,27 @@ class SongGenerationV2LeLMForConditionalGeneration(nn.Module):
             logger.info("SongGenerationV2LeLM: loaded %d condition_provider params", n_loaded)
 
         logger.info("SongGenerationV2LeLM: loaded %d weight params total", len(loaded))
+
+        # Free the three backbones' built-in embed_tokens (~67MB each in bf16):
+        # all paths run on inputs_embeds (stream-0 uses self.emb[0]), so these
+        # tables are dead weight. Done post-load so weight loading is undisturbed.
+        import gc
+
+        freed: list[str] = []
+        for path, mod in (
+            ("null_model.model", getattr(self.null_model, "model", None)),
+            ("transformer2", self.transformer2),
+            ("model", self.model),
+        ):
+            if mod is not None and getattr(mod, "embed_tokens", None) is not None:
+                mod.embed_tokens = None
+                freed.append(path)
+        if freed:
+            gc.collect()
+            if torch.accelerator.is_available():
+                torch.accelerator.empty_cache()
+            logger.info("SongGenerationV2LeLM: freed bypassed embed_tokens on %s", freed)
+
         return loaded
 
     def compute_condition_prompt_len(

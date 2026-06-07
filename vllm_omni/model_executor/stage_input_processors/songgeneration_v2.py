@@ -3,7 +3,12 @@
 """Stage input processor: LeLM (Stage 0) -> Flow1dVAE (Stage 1).
 
 Converts [num_frames, K=3] codec tokens into stream-major flat layout
-for the diffusion decoder. Supports both sync and async-chunk paths.
+for the diffusion decoder.
+
+Only the synchronous full-sequence path is implemented: Stage 0 emits the
+complete codec tensor once at finish, and Stage 1 decodes it in a single
+call. Per-step async-chunk streaming is future work and is intentionally
+not wired up (Stage 0 does not yet emit per-step [K=3] frames).
 """
 
 from __future__ import annotations
@@ -14,12 +19,7 @@ from typing import Any
 import torch
 from vllm.logger import init_logger
 
-from vllm_omni.data_entry_keys import (
-    CodesStruct,
-    MetaStruct,
-    OmniPayload,
-    OmniPayloadStruct,
-)
+from vllm_omni.data_entry_keys import OmniPayload
 
 logger = init_logger(__name__)
 
@@ -105,7 +105,13 @@ def lelm_to_flow1dvae(
             torch.save(save_data, _SAVE_CODES_PATH)
             logger.info("Saved codes [%s] to %s", tuple(codes_BKT.shape), _SAVE_CODES_PATH)
 
-        # Clamp any residual EOS/special tokens to valid codebook range.
+        # Boundary frames can still carry per-stream EOS/special tokens. A plain
+        # clamp(max=16383) would turn those into a real RVQ index and leak
+        # artifacts, so replace residual out-of-range tokens on streams 1/2 with
+        # each stream's neutral filler first. Stream 0 is dropped, so clamp is
+        # fine there.
+        codes_BKT[codes_BKT[:, 1] > _VALID_CODE_MAX, 1] = _VOCAL_REPLACEMENT
+        codes_BKT[codes_BKT[:, 2] > _VALID_CODE_MAX, 2] = _BGM_REPLACEMENT
         codes_BKT = codes_BKT.clamp(max=_VALID_CODE_MAX)
 
         # Stream-major flat layout: [3 * num_frames].
@@ -126,94 +132,6 @@ def lelm_to_flow1dvae(
         )
 
     return flow1dvae_inputs
-
-
-# ---------------------------------------------------------------------------
-# Async path: chunked streaming
-# ---------------------------------------------------------------------------
-
-
-def lelm_to_flow1dvae_async_chunk(
-    transfer_manager: Any,
-    pooling_output: dict[str, Any] | None,
-    request: Any,
-    is_finished: bool = False,
-) -> OmniPayloadStruct | None:
-    """Emit codec chunks as the LeLM produces them (streaming path).
-
-    Accumulates per-step [K=3] frames, then dispatches a window of
-    `chunk_size + left_context_size` frames stream-major to the decoder
-    at chunk boundaries.
-
-    Default alignment: `codec_chunk_frames=750`, `codec_left_context_frames=250`
-    (30 s audio per chunk with 10 s overlap at 25 fps). Deploy YAML can override.
-    """
-    request_id = request.external_req_id
-    finished = bool(is_finished or request.is_finished())
-
-    # Accumulate one frame per step from the pooling output.
-    if isinstance(pooling_output, dict):
-        frame = _extract_last_frame(pooling_output)
-        if frame is not None:
-            transfer_manager.code_prompt_token_ids[request_id].append(frame.detach().to(device="cpu", dtype=torch.long))
-    elif not finished:
-        return None
-
-    # Chunk sizes come from the connector config (deploy YAML).
-    chunk_size, left_context_size_config, initial_chunk_size = _read_chunk_config(
-        transfer_manager,
-        request,
-        default_chunk=750,
-        default_left=250,
-        default_initial=0,
-    )
-    if initial_chunk_size > chunk_size:
-        initial_chunk_size = chunk_size
-
-    length = len(transfer_manager.code_prompt_token_ids[request_id])
-
-    if length <= 0:
-        if finished:
-            return OmniPayloadStruct(
-                codes=CodesStruct(audio=torch.empty(0, dtype=torch.long)),
-                meta=MetaStruct(finished=torch.tensor(True, dtype=torch.bool)),
-            )
-        return None
-
-    in_initial_phase = initial_chunk_size > 0 and length <= chunk_size
-
-    if in_initial_phase:
-        already_sent = transfer_manager.put_req_chunk[request_id] * initial_chunk_size
-        pending = length - already_sent
-        if pending <= 0:
-            return None
-        if pending < initial_chunk_size and not finished:
-            return None
-        context_length = min(pending, initial_chunk_size)
-        left_context_size = max(0, length - context_length)
-        window_frames = transfer_manager.code_prompt_token_ids[request_id][:length]
-    else:
-        initial_coverage = (chunk_size // initial_chunk_size) * initial_chunk_size if initial_chunk_size > 0 else 0
-        adjusted = length - initial_coverage
-        chunk_length = adjusted % chunk_size
-        if chunk_length != 0 and not finished:
-            return None
-        context_length = chunk_length if chunk_length != 0 else chunk_size
-        end_index = min(length, left_context_size_config + context_length)
-        left_context_size = max(0, int(end_index - context_length))
-        window_frames = transfer_manager.code_prompt_token_ids[request_id][-end_index:]
-
-    # Stack per-step [K] frames -> [num_frames, K] -> stream-major flat.
-    stacked_frames = torch.stack(window_frames, dim=0)
-    codec_codes = stacked_frames.transpose(0, 1).contiguous().reshape(-1)
-
-    return OmniPayloadStruct(
-        codes=CodesStruct(audio=codec_codes),
-        meta=MetaStruct(
-            left_context_size=left_context_size,
-            finished=torch.tensor(finished, dtype=torch.bool),
-        ),
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -326,57 +244,6 @@ def _lookup_field(prompt: Any, lelm_output: Any, idx: int, key: str) -> Any:
     return None
 
 
-def _extract_last_frame(pooling_output: dict[str, Any] | OmniPayload) -> torch.Tensor | None:
-    """Return the latest single [K=3] frame from a per-step pooling output."""
-    audio_codes = pooling_output.get("audio_codes")
-    if not isinstance(audio_codes, torch.Tensor) or audio_codes.numel() == 0:
-        codes_val = pooling_output.get("codes") if isinstance(pooling_output, dict) else None
-        audio_codes = codes_val.get("audio") if isinstance(codes_val, dict) else None
-    if not isinstance(audio_codes, torch.Tensor) or audio_codes.numel() == 0:
-        return None
-    if audio_codes.ndim == 2:
-        frame = audio_codes[-1]
-        if frame.numel() == 0 or not (frame <= _VALID_CODE_MAX).any():
-            return None
-        return frame.to(torch.long).reshape(-1)
-    if audio_codes.ndim == 1:
-        if not (audio_codes <= _VALID_CODE_MAX).any():
-            return None
-        return audio_codes.to(torch.long).reshape(-1)
-    raise ValueError(f"Invalid audio_codes shape for SongGeneration v2 async_chunk: {tuple(audio_codes.shape)}")
-
-
-def _read_chunk_config(
-    transfer_manager: Any,
-    request: Any,
-    *,
-    default_chunk: int,
-    default_left: int,
-    default_initial: int,
-) -> tuple[int, int, int]:
-    """Read codec_chunk / left_context / initial_chunk from the connector config."""
-    connector = getattr(transfer_manager, "connector", None)
-    raw_cfg = getattr(connector, "config", {}) or {}
-    cfg = raw_cfg.get("extra", raw_cfg) if isinstance(raw_cfg, dict) else {}
-    chunk_size = int(cfg.get("codec_chunk_frames", default_chunk))
-    left_context = int(cfg.get("codec_left_context_frames", default_left))
-    initial_chunk = int(cfg.get("initial_codec_chunk_frames", default_initial))
-
-    ai = getattr(request, "additional_information", None)
-    if ai is not None and hasattr(ai, "entries") and "initial_codec_chunk_frames" in ai.entries:
-        entry = ai.entries["initial_codec_chunk_frames"]
-        if entry.list_data is not None and len(entry.list_data) == 1:
-            initial_chunk = int(entry.list_data[0])
-
-    if chunk_size <= 0 or left_context < 0 or initial_chunk < 0:
-        raise ValueError(
-            f"Invalid SongGeneration v2 chunk config: chunk={chunk_size}, "
-            f"left_context={left_context}, initial={initial_chunk}"
-        )
-    return chunk_size, left_context, initial_chunk
-
-
 __all__ = [
     "lelm_to_flow1dvae",
-    "lelm_to_flow1dvae_async_chunk",
 ]

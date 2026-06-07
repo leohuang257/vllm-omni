@@ -52,16 +52,15 @@ def _ensure_upstream_on_path(repo_root: str) -> None:
     Both prefixes are needed because upstream uses absolute imports against
     either root (e.g. `from third_party.demucs...`) and against the
     `Flow1dVAE/` dir (e.g. `from tools.get_1dvae_large import...`).
+
+    The upstream repo's own .venv site-packages is intentionally not added: it
+    could shadow the server's transformers/torch. Install the upstream leaf
+    deps into the active environment instead (see the example README).
     """
     flow_dir = os.path.join(repo_root, "codeclm", "tokenizer", "Flow1dVAE")
     for p in (flow_dir, repo_root):
         if p not in sys.path:
             sys.path.insert(0, p)
-    for pyver in ("python3.11", "python3.10"):
-        venv_site = os.path.join(repo_root, ".venv", "lib", pyver, "site-packages")
-        if os.path.isdir(venv_site) and venv_site not in sys.path:
-            sys.path.append(venv_site)
-            break
 
 
 def _strip_audio_tokenizer_prefix(checkpoint_field: str) -> str:
@@ -314,11 +313,19 @@ class SongGenerationV2Flow1dVAESeparateDecoder(nn.Module):
         ns = int(self.decoder_config.num_steps)
         gs = float(self.decoder_config.guidance_scale)
 
+        # code2sound's "duration" is the diffusion window size
+        # (min_samples = duration * frame_rate frames), not the output length.
+        # Derive it from the configured window instead of a magic 40; with the
+        # defaults (1000 frames / 25 fps) this stays 40 but now tracks config.
+        frame_rate = int(getattr(self.decoder_config, "frame_rate", 25)) or 25
+        window_frames = int(getattr(self.decoder_config, "decode_window_frames", 1000))
+        duration_s = max(1, round(window_frames / frame_rate))
+
         wav = self._tango.code2sound(
             (codes_vocal, codes_bgm),
             prompt_vocal=prompt_vocal_wav,
             prompt_bgm=prompt_bgm_wav,
-            duration=40,
+            duration=duration_s,
             guidance_scale=gs,
             num_steps=ns,
             disable_progress=True,

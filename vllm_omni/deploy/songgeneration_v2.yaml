@@ -15,9 +15,6 @@ dtype: bfloat16
 stages:
   - stage_id: 0
     max_num_seqs: 1
-    # FlashAttention v2 crashes (SIGSEGV) in Stage 0's first decode step
-    # due to the custom CFG null-path KV layout. TRITON_ATTN is stable.
-    attention_backend: TRITON_ATTN
     gpu_memory_utilization: 0.50
     enforce_eager: true
     trust_remote_code: true
@@ -40,6 +37,9 @@ stages:
     gpu_memory_utilization: 0.3
     enforce_eager: true
     trust_remote_code: true
+    # Stage 1 reads codec ints only; skip tokenizer init (else it would try
+    # to load a tokenizer from the tokenizer-less repo root and fail).
+    skip_tokenizer_init: true
     enable_prefix_caching: false
     async_scheduling: false
     max_num_batched_tokens: 32768
