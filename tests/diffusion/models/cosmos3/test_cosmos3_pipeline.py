@@ -211,7 +211,7 @@ def make_cosmos3_pipeline():
         pipeline._guidance_scale = None
         pipeline._num_timesteps = None
         pipeline._cosmos3_branch_caches = None
-        pipeline._cache_dit_requires_paired_cfg = False
+        pipeline._cache_backend_requires_paired_cfg = False
         pipeline._sound_tokenizer = None
         pipeline.progress_bar = passthrough_progress_bar
         return pipeline
@@ -1290,7 +1290,7 @@ def test_diffuse_keeps_paired_cfg_when_cache_dit_active(make_cosmos3_pipeline) -
     """
     pipeline = make_cosmos3_pipeline()
     # Marker normally set by ``enable_cache_for_cosmos3`` when cache-dit is on.
-    pipeline._cache_dit_requires_paired_cfg = True
+    pipeline._cache_backend_requires_paired_cfg = True
     latents = torch.zeros(1, 2, 1, 1, 1)
 
     result = pipeline.diffuse(

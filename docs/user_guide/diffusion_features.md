@@ -138,7 +138,7 @@ The following tables show which models support each feature:
 | **Stable-Diffusion3.5**  |     ❌     |     ✅      |           ❌           |       ✅        |         ✅         |          ❌          |   ❌    |             ✅             |      ✅ (decode)      |       ❌        |        ❌         |
 | **Z-Image**              |     ✅     |     ✅      |           ✅           |       ❓        |   ✅ (TP=2 only)   |          ❌          |   ✅    |             ❌             |      ✅ (decode)      |       ✅        |        ❌         |
 | **ERNIE-Image**          |     ❌     |     ✅      |           ✅           |       ❓        |         ✅         |          ❌          |   ✅    |             ✅             |          ❌           |       ❌        |        ❌         |
-| **Cosmos3**              |     ❌     |     ✅      |           ✅           |       ✅        |         ✅         |          ❌          |   ✅    |             ✅             |      ✅ (decode)      |       ✅        |        ❌         |
+| **Cosmos3**              |     ✅     |     ✅      |           ✅           |       ✅        |         ✅         |          ❌          |   ✅    |             ✅             |      ✅ (decode)      |       ✅        |        ❌         |
 
 > Notes:
 > 1. Nextstep_1(T2I) does not support cache acceleration methods such as TeaCache or Cache-DiT.
@@ -157,7 +157,7 @@ The following tables show which models support each feature:
 | **Helios**                   |     ❌     |     ✅      |           ✅           |       ✅        |         ✅         |         ❌         |   ✅    |             ✅             |          ❌           |       ❌        |        ❌         |
 | **HunyuanVideo-1.5 T2V I2V** |     ❌     |     ✅      |           ✅           |       ✅        |         ✅         |         ❌         |   ✅    |             ✅             |  ✅ (encode/decode)   |       ✅        |        ❌         |
 | **DreamID-Omni**             |     ❌     |     ❌      |           ❌           |       ✅        |         ❌         |         ❌         |   ✅    |             ✅             |          ❌           |       ❌        |        ❌         |
-| **Cosmos3**                  |     ❌     |     ✅      |           ✅           |       ✅        |         ✅         |         ❌         |   ✅    |             ✅             |  ✅ (encode/decode)   |       ✅        |        ❌         |
+| **Cosmos3**                  |     ✅     |     ✅      |           ✅           |       ✅        |         ✅         |         ❌         |   ✅    |             ✅             |  ✅ (encode/decode)   |       ✅        |        ❌         |
 
 
 **Frame Interpolation Support**

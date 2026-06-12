@@ -83,6 +83,16 @@ _MODEL_COEFFICIENTS = {
     ],
     # LongCat Image transformer coefficients
     "LongCatImageTransformer2DModel": [652.5980, -424.1615, 84.5526, -4.5923, 0.1694],
+    # Cosmos3 VFM transformer coefficients (Nano and Super share the GEN architecture).
+    # Calibrated on Cosmos3-Nano via TeaCacheCoefficientEstimator:
+    # polyfit on 2176 data points (64 T2V prompts x 35 steps).
+    "Cosmos3VFMTransformer": [
+        -1.04904030e03,
+        4.39934003e02,
+        -6.83467690e01,
+        4.54241596e00,
+        3.16593050e-02,
+    ],
 }
 
 

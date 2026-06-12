@@ -92,11 +92,44 @@ def enable_flux2_klein_teacache(pipeline: Any, config: DiffusionCacheConfig) -> 
     )
 
 
+def enable_cosmos3_teacache(pipeline: Any, config: DiffusionCacheConfig) -> None:
+    """
+    Enable TeaCache for Cosmos3 via the warmup-window hook subclass.
+    """
+    from vllm_omni.diffusion.hooks import HookRegistry
+    from vllm_omni.diffusion.models.cosmos3.teacache_cosmos3 import (
+        COSMOS3_DEFAULT_NUM_WARMUP_STEPS,
+        Cosmos3TeaCacheHook,
+    )
+
+    transformer = pipeline.transformer
+    teacache_config = TeaCacheConfig(
+        transformer_type=transformer.__class__.__name__,
+        rel_l1_thresh=config.rel_l1_thresh,
+        coefficients=config.coefficients,
+    )
+    num_warmup_steps = getattr(config, "num_warmup_steps", None)
+    hook = Cosmos3TeaCacheHook(
+        teacache_config,
+        num_warmup_steps=COSMOS3_DEFAULT_NUM_WARMUP_STEPS if num_warmup_steps is None else num_warmup_steps,
+    )
+    registry = HookRegistry.get_or_create(transformer)
+    registry.register_hook(TeaCacheHook._HOOK_NAME, hook)
+    pipeline._cache_backend_requires_paired_cfg = True
+
+    logger.info(
+        f"TeaCache applied with rel_l1_thresh={teacache_config.rel_l1_thresh}, "
+        f"num_warmup_steps={hook.num_warmup_steps}, "
+        f"transformer_class={teacache_config.transformer_type}"
+    )
+
+
 CUSTOM_TEACACHE_ENABLERS = {
     "BagelPipeline": enable_bagel_teacache,
     "Flux2KleinPipeline": enable_flux2_klein_teacache,
     "HunyuanImage3Pipeline": enable_hunyuan_image3_teacache,
     "SenseNovaU1Pipeline": enable_sensenova_u1_teacache,
+    "Cosmos3OmniDiffusersPipeline": enable_cosmos3_teacache,
 }
 
 
