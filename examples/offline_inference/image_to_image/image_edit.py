@@ -440,10 +440,6 @@ def main():
         }
 
     # Initialize Omni with appropriate pipeline
-    omni_kwargs: dict[str, Any] = {}
-    if args.quantization:
-        omni_kwargs["quantization"] = args.quantization
-
     omni = Omni(
         model=args.model,
         enable_layerwise_offload=args.enable_layerwise_offload,
@@ -456,7 +452,7 @@ def main():
         enable_cpu_offload=args.enable_cpu_offload,
         enable_diffusion_pipeline_profiler=args.enable_diffusion_pipeline_profiler,
         profiler_config=args.profiler_config,
-        **omni_kwargs,
+        quantization=args.quantization,
     )
     print("Pipeline loaded")
 
