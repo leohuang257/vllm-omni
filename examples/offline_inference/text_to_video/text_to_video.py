@@ -11,8 +11,10 @@ import numpy as np
 import torch
 
 from vllm_omni.diffusion.data import DiffusionParallelConfig
+from vllm_omni.diffusion.utils.param_utils import apply_declared_extra_args
 from vllm_omni.entrypoints.omni import Omni
 from vllm_omni.inputs.data import OmniDiffusionSamplingParams
+from vllm_omni.model_extras import get_extra_body_params, get_model_class_name
 from vllm_omni.outputs import OmniRequestOutput
 from vllm_omni.platforms import current_omni_platform
 
@@ -35,11 +37,23 @@ _MODEL_PRESETS = {
         "fps": 24,
         "output": "hunyuan_video_15_output.mp4",
     },
+    "cosmos": {
+        "height": 720,
+        "width": 1280,
+        "num_frames": 189,
+        "num_inference_steps": 35,
+        "guidance_scale": 6.0,
+        "fps": 24,
+        "flow_shift": 10.0,
+        "output": "cosmos3_t2v_output.mp4",
+    },
 }
 
 
 def _detect_preset(model: str) -> dict:
     model_lower = model.lower()
+    if "cosmos" in model_lower:
+        return _MODEL_PRESETS["cosmos"]
     if "hunyuan" in model_lower:
         return _MODEL_PRESETS["hunyuan"]
     return _MODEL_PRESETS["wan"]
@@ -158,6 +172,20 @@ def parse_args() -> argparse.Namespace:
         type=parse_profiler_config,
         default=None,
         help='JSON profiler config for torch/cuda profiling, e.g. \'{"profiler":"torch","torch_profiler_dir":"./perf"}\'.',
+    )
+    parser.add_argument(
+        "--extra-body",
+        type=parse_profiler_config,
+        default=None,
+        help=(
+            "Model-specific generation params as a JSON object. Keys are filtered "
+            "against the model's declared extra_body_params (see vllm_omni/model_extras), "
+            "so unknown keys for the chosen model are silently dropped. "
+            'Cosmos3 example: \'{"flow_shift": 10.0, "max_sequence_length": 4096, '
+            '"guardrails": false, "use_resolution_template": false, '
+            '"use_duration_template": false}\'. Add "generate_sound": true (and '
+            'optional "sound_duration") for synchronized audio.'
+        ),
     )
     parser.add_argument(
         "--quantization",
@@ -322,7 +350,14 @@ def main():
         omni_kwargs["cache_config"] = cache_config
         omni_kwargs["enable_cache_dit_summary"] = args.enable_cache_dit_summary
 
+    # Cosmos3 loads its (gated) guardrail models at build time, so the guardrails
+    # gate is an engine-level config (offline analog of the server's --no-guardrails).
+    if args.extra_body and "guardrails" in args.extra_body:
+        omni_kwargs["model_config"] = {"guardrails": bool(args.extra_body["guardrails"])}
+
     omni = Omni(**omni_kwargs)
+    model_class_name = get_model_class_name(omni)
+    declared_extra_body_params = get_extra_body_params(model_class_name)
 
     if profiler_enabled:
         print("[Profiler] Starting profiling...")
@@ -358,10 +393,21 @@ def main():
     if args.guidance_scale_high is not None:
         sampling_kwargs["guidance_scale_2"] = args.guidance_scale_high
 
+    sampling_params = OmniDiffusionSamplingParams(**sampling_kwargs)
+
+    # Route model-specific knobs through extra_body, filtered against the model's
+    # declared extra_body_params. Models without a declaration only forward explicit
+    # --extra-body JSON (preserving the generic flags' legacy behavior).
+    extra_body = dict(args.extra_body or {})
+    if declared_extra_body_params:
+        apply_declared_extra_args(sampling_params, declared_extra_body_params, extra_body)
+    elif extra_body:
+        sampling_params.extra_args.update({k: v for k, v in extra_body.items() if v is not None})
+
     generation_start = time.perf_counter()
     frames = omni.generate(
         prompt_dict,
-        OmniDiffusionSamplingParams(**sampling_kwargs),
+        sampling_params,
     )
     generation_end = time.perf_counter()
     generation_time = generation_end - generation_start
