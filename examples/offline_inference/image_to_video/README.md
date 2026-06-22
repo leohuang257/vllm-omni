@@ -72,13 +72,13 @@ Key arguments:
 - `--extra-body`: JSON object of model-specific generation params, filtered against the model's declared `extra_body_params` (see [`vllm_omni/model_extras`](../../../vllm_omni/model_extras)). Used by Cosmos3.
 - `--prompt`: Text description of desired motion/animation.
 - `--height/--width`: Output resolution (auto-calculated from image if not set). Dimensions should be multiples of 16.
-- `--num-frames`: Number of frames (default 81).
+- `--num-frames`: Number of frames (default: model-specific — Wan 81, LTX2 121, Cosmos3 189).
 - `--guidance-scale` and `--guidance-scale-high`: CFG scale (applied to low/high-noise stages for MoE).
 - `--negative-prompt`: Optional list of artifacts to suppress.
 - `--boundary-ratio`: Boundary split ratio for two-stage MoE models.
-- `--flow-shift`: Scheduler flow shift (5.0 for 720p, 12.0 for 480p).
+- `--flow-shift`: Scheduler flow shift (default: model-specific — Wan/LTX2 5.0, Cosmos3 10.0).
 - `--sample-solver`: Wan2.2 sampling solver. Use `unipc` for the default multistep solver, or `euler` for Lightning/Distill checkpoints.
-- `--num-inference-steps`: Number of denoising steps (default 50).
+- `--num-inference-steps`: Number of denoising steps (default: model-specific — Wan 50, LTX2 40, Cosmos3 35).
 - `--fps`: Frames per second for the saved MP4 (requires `diffusers` export_to_video).
 - `--output`: Path to save the generated video.
 - `--vae-use-slicing`: Enable VAE slicing for memory optimization.

@@ -39,6 +39,7 @@ Usage:
 """
 
 import argparse
+import functools
 import json
 import time
 from pathlib import Path
@@ -57,14 +58,18 @@ from vllm_omni.outputs import OmniRequestOutput
 from vllm_omni.platforms import current_omni_platform
 
 
-def parse_profiler_config(value: str) -> dict[str, Any]:
+def parse_json_object(value: str, flag_name: str = "argument") -> dict[str, Any]:
+    """Parse a CLI value as a JSON object, attributing errors to ``flag_name``."""
     try:
         config = json.loads(value)
     except json.JSONDecodeError as e:
-        raise argparse.ArgumentTypeError(f"--profiler-config must be valid JSON: {e}") from e
+        raise argparse.ArgumentTypeError(f"{flag_name} must be valid JSON: {e}") from e
     if not isinstance(config, dict):
-        raise argparse.ArgumentTypeError("--profiler-config must be a JSON object")
+        raise argparse.ArgumentTypeError(f"{flag_name} must be a JSON object")
     return config
+
+
+parse_profiler_config = functools.partial(parse_json_object, flag_name="--profiler-config")
 
 
 def parse_args() -> argparse.Namespace:
@@ -259,7 +264,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--extra-body",
-        type=parse_profiler_config,
+        type=functools.partial(parse_json_object, flag_name="--extra-body"),
         default=None,
         help=(
             "Model-specific generation params as a JSON object. Keys are filtered "
@@ -313,7 +318,7 @@ def main():
             16,
         )
     elif is_ltx2:
-        d_fps, d_guidance, d_num_frames, d_steps, d_flow_shift, d_max_area, d_mod = 24, 5.0, 81, 50, 5.0, 512 * 768, 32
+        d_fps, d_guidance, d_num_frames, d_steps, d_flow_shift, d_max_area, d_mod = 24, 4.0, 121, 40, 5.0, 512 * 768, 32
     else:  # Wan2.2 / HunyuanVideo-1.5
         d_fps, d_guidance, d_num_frames, d_steps, d_flow_shift, d_max_area, d_mod = 16, 5.0, 81, 50, 5.0, 480 * 832, 16
 

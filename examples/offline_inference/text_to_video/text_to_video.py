@@ -120,8 +120,12 @@ def parse_args() -> argparse.Namespace:
         type=parse_extra_body,
         default=None,
         help="JSON dict of model-specific extra_body params (declared in vllm_omni/model_extras/), "
-        "merged into sampling extra_args. Example (Helios-Distilled): "
-        '\'{"is_enable_stage2": true, "pyramid_num_inference_steps_list": [2, 2, 2], "is_amplify_first_chunk": true}\'.',
+        "merged into sampling extra_args. Unknown keys for the chosen model are dropped. "
+        'Cosmos3 example: \'{"flow_shift": 10.0, "max_sequence_length": 4096, "guardrails": false, '
+        '"use_resolution_template": false, "use_duration_template": false}\' '
+        '(add "generate_sound": true and optional "sound_duration" for synchronized audio). '
+        'Helios-Distilled example: \'{"is_enable_stage2": true, '
+        '"pyramid_num_inference_steps_list": [2, 2, 2], "is_amplify_first_chunk": true}\'.',
     )
     parser.add_argument("--seed", type=int, default=42, help="Random seed.")
     parser.add_argument("--guidance-scale", type=float, default=None, help="CFG scale. Default: model-specific.")
@@ -207,20 +211,6 @@ def parse_args() -> argparse.Namespace:
         type=parse_profiler_config,
         default=None,
         help='JSON profiler config for torch/cuda profiling, e.g. \'{"profiler":"torch","torch_profiler_dir":"./perf"}\'.',
-    )
-    parser.add_argument(
-        "--extra-body",
-        type=parse_profiler_config,
-        default=None,
-        help=(
-            "Model-specific generation params as a JSON object. Keys are filtered "
-            "against the model's declared extra_body_params (see vllm_omni/model_extras), "
-            "so unknown keys for the chosen model are silently dropped. "
-            'Cosmos3 example: \'{"flow_shift": 10.0, "max_sequence_length": 4096, '
-            '"guardrails": false, "use_resolution_template": false, '
-            '"use_duration_template": false}\'. Add "generate_sound": true (and '
-            'optional "sound_duration") for synchronized audio.'
-        ),
     )
     parser.add_argument(
         "--quantization",
@@ -427,9 +417,6 @@ def main():
     )
     if args.guidance_scale_high is not None:
         sampling_kwargs["guidance_scale_2"] = args.guidance_scale_high
-    if args.extra_body:
-        # Model-specific knobs (declared in vllm_omni/model_extras/) routed via extra_args.
-        sampling_kwargs["extra_args"] = dict(args.extra_body)
 
     sampling_params = OmniDiffusionSamplingParams(**sampling_kwargs)
 
