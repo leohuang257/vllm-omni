@@ -88,6 +88,24 @@ python image_to_video.py \
   --output cosmos3_i2v.mp4
 ```
 
+### DreamX-World-5B-Cam
+
+Camera action tokens (composable, e.g. `"wj"` = push in + pan left):
+`w` push in · `s` pull out · `a` move left · `d` move right ·
+`i` tilt up · `k` tilt down · `j` pan left · `l` pan right.
+
+```bash
+python image_to_video.py \
+  --model GD-ML/DreamX-World-5B-Cam \
+  --image /path/to/DreamX-World/demo/007.jpg \
+  --prompt "Style: Minecraft. A serene Minecraft landscape at sunset, featuring a blocky cliffside overlooking a calm ocean. In the foreground, grassy terrain with yellow flowers and red soil leads up to a rugged cliff composed of layered red and gray blocks. Sparse trees grow on rocky outcrops, adding life to the structured environment. The midground reveals the cliff's dramatic descent into the water, while the background showcases a vast ocean reflecting the warm hues of the setting sun. The sky is painted in gradients of orange, pink, and pale blue, with pixelated clouds drifting above. The lighting casts soft shadows and enhances the textured, cubic surfaces, creating a peaceful and immersive atmosphere that blends natural beauty with digital artistry." \
+  --height 704 --width 1280 --num-frames 121 --fps 24 \
+  --num-inference-steps 50 --guidance-scale 3.0 --flow-shift 3.0 --seed 42 \
+  --extra-body '{"action_seq": ["w", "wj"], "action_speed_list": [4, 6]}' \
+  --output dreamx_i2v.mp4
+```
+
+
 Key arguments:
 
 - `--model`: Model ID (I2V-A14B for MoE, TI2V-5B for unified T2V+I2V,
