@@ -116,16 +116,23 @@ class TeaCacheConfig:
         transformer_type: Transformer class name (e.g., "QwenImageTransformer2DModel").
             Auto-detected from pipeline.transformer.__class__.__name__ in backend.
             Defaults to "QwenImageTransformer2DModel".
+        num_warmup_steps: Number of initial denoising steps (per CFG branch) that
+            always compute the full transformer before caching may engage
+            (official TeaCache ``ret_steps`` behavior). Defaults to 0.
     """
 
     rel_l1_thresh: float = 0.2
     coefficients: list[float] | None = None
     transformer_type: str = "QwenImageTransformer2DModel"
+    num_warmup_steps: int = 0
 
     def __post_init__(self) -> None:
         """Validate and set default coefficients."""
         if self.rel_l1_thresh <= 0:
             raise ValueError(f"rel_l1_thresh must be positive, got {self.rel_l1_thresh}")
+
+        if self.num_warmup_steps < 0:
+            raise ValueError(f"num_warmup_steps must be >= 0, got {self.num_warmup_steps}")
 
         if self.coefficients is None:
             # Use model-specific coefficients, explicitly check if the type exists or not

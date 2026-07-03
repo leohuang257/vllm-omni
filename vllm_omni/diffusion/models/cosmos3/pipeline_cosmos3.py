@@ -2190,7 +2190,15 @@ class Cosmos3OmniDiffusersPipeline(
         cfg_parallel = self._cfg_parallel_active() and do_cfg
         step_scheduler = scheduler if scheduler is not None else self.scheduler
         self.transformer.reset_cache()
-        # The TeaCache hook keys its per-CFG-branch cache state off this attribute.
+        # T2I batch>1 re-runs this loop within one request, so reset TeaCache
+        # state here; the per-request backend refresh alone would leak
+        # warmup counters and residuals across samples.
+        registry = getattr(self.transformer, "_hook_registry", None)
+        if registry is not None:
+            registry.reset_hook("teacache")
+        # The TeaCache hook keys its per-CFG-branch cache state off this
+        # attribute; while True it requires strictly paired cond/uncond
+        # forwards (see _cache_backend_requires_paired_cfg).
         self.transformer.do_true_cfg = do_cfg
 
         def _cfg_active_at(t: torch.Tensor) -> bool:
@@ -2511,6 +2519,9 @@ class Cosmos3OmniDiffusersPipeline(
 
         self.transformer.reset_cache()
         self._cosmos3_branch_caches = {}
+        # Transfer runs heterogeneous multi-branch forwards per step, which
+        # doesn't fit TeaCache's single-state/parity model; bypass caching.
+        self.transformer._teacache_disabled = True
         try:
             for t in self.progress_bar(timesteps):
                 timestep = t.unsqueeze(0)
@@ -2615,6 +2626,7 @@ class Cosmos3OmniDiffusersPipeline(
                 latents = self.scheduler.step(noise_pred, t, latents, return_dict=False)[0]
                 latents = velocity_mask * latents + (1.0 - velocity_mask) * condition_latents
         finally:
+            self.transformer._teacache_disabled = False
             self._cosmos3_branch_caches = None
             self.transformer.reset_cache()
         return latents

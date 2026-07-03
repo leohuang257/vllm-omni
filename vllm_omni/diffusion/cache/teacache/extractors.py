@@ -1264,246 +1264,66 @@ def extract_cosmos3_context(
     action_fps: float | None = None,
     sound_latents: torch.Tensor | None = None,
     noisy_frame_mask: torch.Tensor | None = None,
+    control_latents: list[torch.Tensor] | tuple[torch.Tensor, ...] | torch.Tensor | None = None,
+    transfer_share_vision_temporal_positions: bool = True,
     **kwargs: Any,
 ) -> CacheContext:
     """
     Extract cache context for Cosmos3VFMTransformer.
 
-    This mirrors the Cosmos3VFMTransformer GEN forward path while exposing
-    the first GEN layer's input RMSNorm output as TeaCache's similarity signal.
+    Delegates to the transformer's shared GEN-pathway helpers
+    (``_gen_preprocess`` / ``_run_gen_layers`` / ``_gen_postprocess``) — the
+    same code ``forward`` runs. Cosmos3 has no adaLN, so the first GEN layer's
+    input RMSNorm output serves as TeaCache's similarity signal; TeaCache
+    caches only the GEN pathway (the UND K/V cache is pipeline-owned), and the
+    cached residual covers the full packed GEN sequence.
 
-    Architecture Notes:
-        - MoT model: UND language model runs once per generation (K/V cached on
-          the module by the pipeline); GEN layers run every denoising step.
-          TeaCache caches only the GEN pathway.
-        - No adaLN: timestep embedding is added directly to GEN tokens; the first
-          GEN layer's input RMSNorm output is the cache similarity signal.
-        - Video, action, and sound tokens are concatenated into one GEN sequence;
-          the cached residual covers the full sequence.
-
-    Args:
-        module: Cosmos3VFMTransformer instance
-        hidden_states: Noisy video latents [B, C, t, h, w]
-        timestep: Diffusion timestep [B]
-        text_ids: Tokenized text [B, S_text]
-        text_mask: Text attention mask [B, S_text]
-        video_shape: Latent-space shape (t, h, w)
-        fps: Video frame rate for temporal RoPE
-        action_latents: Optional noisy action latents
-        action_domain_ids: Optional embodiment domain IDs
-        action_noisy_mask: Optional per-action-token noisy mask
-        action_start_frame_offset: Action RoPE frame offset
-        action_fps: Action frame rate for RoPE
-        sound_latents: Optional noisy sound latents
-        noisy_frame_mask: Optional per-frame noisy mask for I2V/V2V
-        **kwargs: Additional keyword arguments ignored by this extractor
+    Arguments mirror ``Cosmos3VFMTransformer.forward`` exactly.
 
     Returns:
         CacheContext with all information needed for generic caching
     """
-    from vllm_omni.diffusion.models.cosmos3.transformer_cosmos3 import _get_ulysses_state
-
     if not hasattr(module, "gen_layers") or len(module.gen_layers) == 0:
         raise ValueError("Module must have gen_layers")
+    if kwargs:
+        raise TypeError(f"Unexpected Cosmos3 transformer kwargs: {sorted(kwargs)}")
 
-    # ============================================================================
-    # PREPROCESSING (Cosmos3-specific)
-    # ============================================================================
-    t, h, w = video_shape
-    hp, wp, _, _ = module._pad_to_patch_size(h, w)
-    text_lengths = text_mask.sum(dim=1)
-    min_real_len = int(text_lengths.min().item())
-    max_real_len = int(text_lengths.max().item())
-    if min_real_len != max_real_len:
-        raise ValueError(
-            f"Cosmos3 requires identical real text lengths within a batch (got min={min_real_len}, max={max_real_len})."
-        )
-    has_action = action_latents is not None
-    has_sound = sound_latents is not None
-    if has_action and not module.action_gen:
-        raise ValueError(
-            "Cosmos3 action generation was requested, but this transformer "
-            "was initialized without action modules. Check that the "
-            "transformer config enables action_gen."
-        )
-    if has_sound and not module.sound_gen:
-        raise ValueError(
-            "Cosmos3 sound generation was requested, but this transformer "
-            "was initialized without sound modules. Check that the "
-            "transformer config enables sound_gen or defines sound_dim."
-        )
-
-    ulysses_size, _, _ = _get_ulysses_state()
-
-    # Patchify latents and project to hidden space
-    hidden_video = module.proj_in(module.patchify(hidden_states, t, h, w))
-    s_video = hidden_video.shape[1]
-    s_action = 0
-    hidden_action = None
-    s_sound = 0
-    hidden_sound = None
-    if action_latents is not None:
-        if action_latents.shape[0] != hidden_states.shape[0]:
-            raise ValueError(
-                "Cosmos3 action and video batch sizes must match: "
-                f"video={hidden_states.shape[0]}, action={action_latents.shape[0]}."
-            )
-        if action_domain_ids is None:
-            action_domain_ids = torch.zeros(action_latents.shape[0], dtype=torch.long, device=action_latents.device)
-        hidden_action = module.action_proj_in(module.pack_action(action_latents), action_domain_ids)
-        hidden_action = hidden_action + module.action_modality_embed.to(hidden_action.dtype)
-        s_action = hidden_action.shape[1]
-    if sound_latents is not None:
-        if sound_latents.shape[0] != hidden_states.shape[0]:
-            raise ValueError(
-                "Cosmos3 sound and video batch sizes must match: "
-                f"video={hidden_states.shape[0]}, sound={sound_latents.shape[0]}."
-            )
-        hidden_sound = module.audio_proj_in(module.pack_sound(sound_latents))
-        hidden_sound = hidden_sound + module.audio_modality_embed.to(hidden_sound.dtype)
-        s_sound = hidden_sound.shape[1]
-
-    # Timestep embedding (fp32); added only to noisy tokens.
-    with torch.autocast("cuda", enabled=True, dtype=torch.float32):
-        time_embed = module.time_embedder(timestep * module.timestep_scale)
-    time_embed = time_embed.to(hidden_states.dtype)
-
-    if noisy_frame_mask is not None:
-        token_noisy_mask = (
-            noisy_frame_mask[:, 0, :, 0, 0].unsqueeze(-1).expand(-1, -1, hp * wp).reshape(hidden_video.shape[0], -1, 1)
-        )
-        hidden_video = hidden_video + time_embed.unsqueeze(1) * token_noisy_mask
-    else:
-        hidden_video = hidden_video + time_embed.unsqueeze(1)
-
-    if hidden_action is not None:
-        if action_noisy_mask is None:
-            hidden_action = hidden_action + time_embed.unsqueeze(1)
-        else:
-            if action_noisy_mask.shape != (hidden_action.shape[0], hidden_action.shape[1], 1):
-                raise ValueError(
-                    f"Cosmos3 action_noisy_mask must have shape [B, T_action, 1], got {tuple(action_noisy_mask.shape)}."
-                )
-            hidden_action = hidden_action + time_embed.unsqueeze(1) * action_noisy_mask.to(hidden_action.dtype)
-
-    if hidden_sound is not None:
-        hidden_sound = hidden_sound + time_embed.unsqueeze(1)
-    hidden_parts = [hidden_video]
-    if hidden_action is not None:
-        hidden_parts.append(hidden_action)
-    if hidden_sound is not None:
-        hidden_parts.append(hidden_sound)
-    hidden_gen = torch.cat(hidden_parts, dim=1)
-
-    # Run UND pathway once; pipeline swaps cached K/V between CFG branches.
-    if module.cached_kv is None:
-        freqs_und, freqs_gen_full = module._compute_rope_freqs(
-            text_mask,
-            t,
-            hp,
-            wp,
-            fps,
-            hidden_states.device,
-            hidden_states.dtype,
-            t_action=s_action,
-            action_start_frame_offset=action_start_frame_offset,
-            action_fps=action_fps,
-            t_sound=s_sound,
-        )
-        cached_kv_full = module.language_model(text_ids, freqs_und)
-        module.cached_freqs_gen = freqs_gen_full
-
-        module.cached_kv = [(k[:, :max_real_len], v[:, :max_real_len]) for k, v in cached_kv_full]
-
-    # Mirrors the matching guard in Cosmos3VFMTransformer.forward (kept for diff sync).
-    if module.cached_kv is None or module.cached_freqs_gen is None:
-        raise RuntimeError("Cosmos3 GEN cache was not initialized before running GEN layers.")
-    module._validate_gen_sequence_parallel(
-        s_gen=hidden_gen.shape[1],
-        s_video=s_video,
-        s_action=s_action,
-        s_sound=s_sound,
-        has_action=has_action,
-        has_sound=has_sound,
-        ulysses_size=ulysses_size,
+    prep = module._gen_preprocess(
+        hidden_states,
+        timestep,
+        text_ids,
+        text_mask,
+        video_shape,
+        fps=fps,
+        action_latents=action_latents,
+        action_domain_ids=action_domain_ids,
+        action_noisy_mask=action_noisy_mask,
+        action_start_frame_offset=action_start_frame_offset,
+        action_fps=action_fps,
+        sound_latents=sound_latents,
+        noisy_frame_mask=noisy_frame_mask,
+        control_latents=control_latents,
+        transfer_share_vision_temporal_positions=transfer_share_vision_temporal_positions,
     )
-    # Call gen_sp_prepare so SequenceParallelInput hooks fire when SP is enabled.
-    freqs_cos, freqs_sin = module.cached_freqs_gen
-    hidden_gen, freqs_cos, freqs_sin = module.gen_sp_prepare(hidden_gen, freqs_cos, freqs_sin)
-    cached_kv = module.cached_kv
 
-    # ============================================================================
-    # EXTRACT MODULATED INPUT (for cache decision)
-    # ============================================================================
     # Cosmos3 has no adaLN modulation; the timestep embedding was added to
-    # every noisy GEN token above, so the first GEN layer's input RMSNorm
-    # output carries the timestep signal the cache discriminator needs.
-    first_layer = module.gen_layers[0]
-    modulated_input = first_layer.input_layernorm(hidden_gen)
+    # every noisy GEN token in _gen_preprocess, so the first GEN layer's input
+    # RMSNorm output carries the timestep signal the cache discriminator needs.
+    modulated_input = module.gen_layers[0].input_layernorm(prep.hidden_gen)
 
-    # ============================================================================
-    # DEFINE TRANSFORMER EXECUTION (Cosmos3-specific)
-    # ============================================================================
     def run_transformer_blocks() -> tuple[torch.Tensor]:
-        """Execute all Cosmos3 GEN decoder layers.
+        """Execute all Cosmos3 GEN decoder layers (single-stream pathway)."""
+        return (module._run_gen_layers(prep.hidden_gen, prep.freqs_cos, prep.freqs_sin),)
 
-        Returns:
-            Tuple containing only hidden_states (single-stream GEN pathway).
-            Format: (hidden_states,)
-        """
-        hidden = hidden_gen
-        for layer, (k_und, v_und) in zip(module.gen_layers, cached_kv, strict=True):
-            hidden = layer(
-                hidden,
-                k_und=k_und,
-                v_und=v_und,
-                freqs_cos=freqs_cos,
-                freqs_sin=freqs_sin,
-            )
-        return (hidden,)
-
-    # ============================================================================
-    # DEFINE POSTPROCESSING
-    # ============================================================================
     def postprocess(hidden: torch.Tensor) -> Any:
-        """Apply Cosmos3-specific output postprocessing.
+        """Unpatchify/unpack GEN outputs into the model's return format."""
+        return module._gen_postprocess(hidden, prep)
 
-        Args:
-            hidden: Hidden states from GEN layers [B, S_gen, hidden_size]
-
-        Returns:
-            Video velocity tensor, or tuple in video/action/sound order
-        """
-        hidden = module.gen_sp_gather(hidden)
-        hidden = module.norm_moe_gen(hidden)
-        if not has_action and not has_sound:
-            return module.unpatchify(module.proj_out(hidden), t, h, w)
-
-        split_sizes = [s_video]
-        if has_action:
-            split_sizes.append(s_action)
-        if has_sound:
-            split_sizes.append(s_sound)
-        split_hidden = hidden.split(split_sizes, dim=1)
-        video_pred = module.unpatchify(module.proj_out(split_hidden[0]), t, h, w)
-        outputs: list[torch.Tensor] = [video_pred]
-        split_idx = 1
-        if has_action:
-            assert action_domain_ids is not None
-            outputs.append(module.unpack_action(module.action_proj_out(split_hidden[split_idx], action_domain_ids)))
-            split_idx += 1
-        if has_sound:
-            outputs.append(module.unpack_sound(module.audio_proj_out(split_hidden[split_idx])))
-        return tuple(outputs)
-
-    # ============================================================================
-    # RETURN CONTEXT
-    # ============================================================================
     return CacheContext(
         modulated_input=modulated_input,
-        hidden_states=hidden_gen,
+        hidden_states=prep.hidden_gen,
         encoder_hidden_states=None,  # UND text conditioning enters via cached K/V
-        temb=time_embed,
+        temb=prep.time_embed,
         run_transformer_blocks=run_transformer_blocks,
         postprocess=postprocess,
     )
