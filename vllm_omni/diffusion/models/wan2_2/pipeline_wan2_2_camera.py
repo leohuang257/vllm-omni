@@ -13,7 +13,6 @@ transformer as a CFG-invariant ``cam_emb``.
 from __future__ import annotations
 
 import json
-import logging
 import os
 from typing import Any
 
@@ -27,7 +26,7 @@ from vllm_omni.diffusion.distributed.utils import get_local_device
 from vllm_omni.diffusion.model_loader.diffusers_loader import DiffusersPipelineLoader
 from vllm_omni.diffusion.model_loader.hub_prefetch import from_pretrained_with_prefetch, prefetch_subfolders
 from vllm_omni.diffusion.request import OmniDiffusionRequest
-from vllm_omni.inputs.data import OmniTextPrompt
+from vllm_omni.diffusion.worker.request_batch import DiffusionRequestBatch
 
 from .camera_pose_utils import build_camera_condition, validate_action_sequence
 from .pipeline_wan2_2 import (
@@ -37,8 +36,6 @@ from .pipeline_wan2_2 import (
     get_wan22_pre_process_func,
 )
 from .wan2_2_camera_transformer import WanCameraTransformer3DModel, create_camera_transformer_from_config
-
-logger = logging.getLogger(__name__)
 
 # Default base repo providing VAE / text_encoder / tokenizer / scheduler (DreamX's
 # HF metadata lists Wan2.2-T2V-5B; inference uses the unified TI2V-5B diffusers repo).
@@ -135,20 +132,40 @@ def get_wan22_camera_pre_process_func(od_config: OmniDiffusionConfig):
             num_frames,
         )
 
-        for i, prompt in enumerate(request.prompts):
-            if isinstance(prompt, str):
-                prompt = OmniTextPrompt(prompt=prompt)
-            if "additional_information" not in prompt:
-                prompt["additional_information"] = {}
-            prompt["additional_information"]["camera_condition"] = camera_condition
-            # Apply the upstream DreamX default negative prompt when the caller
-            # left it empty (the base encoder otherwise uses ""), for parity.
-            if not prompt.get("negative_prompt"):
-                prompt["negative_prompt"] = DREAMX_NEGATIVE_PROMPT
-            request.prompts[i] = prompt
+        # base_pre already normalised request.prompt to an OmniTextPrompt with
+        # an "additional_information" dict (bare strings included).
+        prompt = request.prompt
+        prompt["additional_information"]["camera_condition"] = camera_condition
+        # Apply the upstream DreamX default negative prompt when the caller
+        # left it empty (the base encoder otherwise uses ""), for parity.
+        if not prompt.get("negative_prompt"):
+            prompt["negative_prompt"] = DREAMX_NEGATIVE_PROMPT
         return request
 
     return pre_process_func
+
+
+def _extract_camera_condition(req: DiffusionRequestBatch) -> dict[str, torch.Tensor]:
+    """Read the pre-process camera condition and add a batch dim ([T,4,4]->[1,T,4,4]).
+
+    Raises instead of falling back to plain I2V: a missing condition means the
+    camera pre-process was bypassed or the controls were never attached, and
+    silently continuing would hide such integration regressions. The dummy
+    warmup always passes through the pre-process, which attaches a minimal
+    trajectory, so this never fires during engine startup.
+    """
+    first = req.prompts[0] if req.prompts else None
+    cc = None
+    if first is not None and not isinstance(first, str):
+        cc = first.get("additional_information", {}).get("camera_condition")
+    if cc is None:
+        raise ValueError(
+            "WanCameraPipeline.forward received no camera_condition: the camera "
+            "pre-process was bypassed or 'action_seq'/'action_speed_list' were not "
+            "attached to the request. For plain image-to-video without camera "
+            "control, use the base Wan2.2-TI2V-5B (WanPipeline)."
+        )
+    return {k: (v.unsqueeze(0) if v.dim() == 3 else v) for k, v in cc.items()}
 
 
 class Wan22CameraPipeline(Wan22Pipeline):
@@ -256,25 +273,10 @@ class Wan22CameraPipeline(Wan22Pipeline):
             kwargs["cam_emb"] = self._active_cam_emb
         return super().predict_noise(current_model=current_model, **kwargs)
 
-    def forward(self, req: OmniDiffusionRequest, *args, **kwargs):
-        # Read the camera condition stashed by the pre-process; add a batch dim
-        # ([T,4,4]->[1,T,4,4]) and hold it for predict_noise. Device/dtype move and
+    def forward(self, req: DiffusionRequestBatch, *args, **kwargs):
+        # Hold the camera condition for predict_noise. Device/dtype move and
         # frame-count validation happen inside the transformer forward.
-        cam_emb = None
-        first = req.prompts[0] if req.prompts else None
-        if first is not None and not isinstance(first, str):
-            cc = first.get("additional_information", {}).get("camera_condition")
-            if cc is not None:
-                cam_emb = {k: (v.unsqueeze(0) if v.dim() == 3 else v) for k, v in cc.items()}
-        if cam_emb is None:
-            # No camera condition (pre-process bypassed, or a bare-string prompt):
-            # the camera branch stays inactive and the model runs as plain I2V.
-            logger.warning_once(
-                "WanCameraPipeline.forward received no camera_condition; running as plain "
-                "image-to-video (camera control inactive). Ensure the camera pre-process ran "
-                "and action_seq/action_speed_list were provided."
-            )
-        self._active_cam_emb = cam_emb
+        self._active_cam_emb = _extract_camera_condition(req)
         try:
             return super().forward(req, *args, **kwargs)
         finally:

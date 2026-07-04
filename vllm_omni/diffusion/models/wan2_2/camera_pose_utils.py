@@ -198,12 +198,45 @@ def quaternion_to_rotation_matrix(q):
     )
 
 
+def _allocate_action_durations(num_frames: int, num_actions: int) -> list[int]:
+    """Split the ``num_frames - 1`` motion frames across ``num_actions`` segments.
+
+    Frame 0 is the identity pose, so only ``num_frames - 1`` frames carry motion.
+    Segment boundaries are proportionally rounded, so any remainder is spread
+    across the sequence instead of always shorting the final action; durations
+    differ by at most one frame. Examples: 121 frames / 2 actions -> [60, 60];
+    81 / 3 -> [27, 26, 27]; 11 / 3 -> [3, 4, 3].
+    """
+    if num_actions <= 0:
+        raise ValueError(f"num_actions must be positive, got {num_actions}")
+    total = num_frames - 1
+    if total < num_actions:
+        raise ValueError(
+            f"num_frames={num_frames} leaves {total} motion frames for {num_actions} "
+            f"action(s) (frame 0 is the identity pose); every action needs at least "
+            f"one motion frame, so num_frames must be >= {num_actions + 1}"
+        )
+    boundaries = [round(i * total / num_actions) for i in range(num_actions + 1)]
+    return [boundaries[i + 1] - boundaries[i] for i in range(num_actions)]
+
+
 def ActionToPoseFromID(action_ids, action_speed_list, duration=33):
     """Convert action segments into a list of upstream 19-field pose strings.
 
-    The first row is the identity (canonical) frame; subsequent rows are one
-    per generated frame (``duration`` frames per action segment).
+    The first row is the identity (canonical) frame; subsequent rows are one per
+    generated frame. ``duration`` is either a scalar (the upstream form: the same
+    frame count for every action segment) or a per-action sequence, e.g. from
+    ``_allocate_action_durations``.
     """
+    if isinstance(duration, (list, tuple)):
+        durations = list(duration)
+        if len(durations) != len(action_ids):
+            raise ValueError(
+                f"duration list (len {len(durations)}) and action_ids (len {len(action_ids)}) must have equal length"
+            )
+    else:
+        durations = [duration] * len(action_ids)
+
     all_positions = []
     all_rotations = []
     current_pose = {
@@ -224,7 +257,7 @@ def ActionToPoseFromID(action_ids, action_speed_list, duration=33):
             motion_types=motion_types,
             translation_value=speed * TRANSLATION_BASE_UNIT,
             rotation_value=speed * ROTATION_BASE_UNIT,
-            duration=duration,
+            duration=durations[idx],
         )
         all_positions.extend(positions)
         all_rotations.extend(rotations)
@@ -469,11 +502,23 @@ def build_camera_condition(
     but unused in the PRoPE path. Returns
     ``{"viewmats": [T_lat, 4, 4], "K": [T_lat, 3, 3]}`` with
     ``T_lat = 1 + (num_frames - 1) // 4``.
+
+    Motion frames are allocated explicitly per action (frame 0 is the identity
+    pose, the remaining ``num_frames - 1`` frames are split evenly across
+    actions). This intentionally diverges from upstream DreamX, which uses
+    ``ceil(num_frames / len(action_seq))`` per action and truncates the tail —
+    under-representing the final action for most frame counts. ``num_frames == 1``
+    (the engine dummy-warmup shape) yields the identity-only trajectory;
+    ``1 < num_frames <= len(action_seq)`` raises.
     """
     validate_action_sequence(action_seq, action_speed_list)
-    duration = math.ceil(num_frames / len(action_seq))
-    poses = ActionToPoseFromID(action_seq, action_speed_list, duration=duration)
-    poses = poses[:num_frames]  # identity row included before truncation
+    if num_frames == 1:
+        # Identity pose only — no room for motion (dummy warmup uses this).
+        poses = ActionToPoseFromID([], [], duration=[])
+    else:
+        durations = _allocate_action_durations(num_frames, len(action_seq))
+        poses = ActionToPoseFromID(action_seq, action_speed_list, duration=durations)
+    assert len(poses) == num_frames, f"pose generation produced {len(poses)} rows, expected {num_frames}"
     camera_condition, _ = GetPoseEmbedsFromPosesPrope(
         poses,
         height,

@@ -49,13 +49,12 @@ and passed via `--extra-body`.
 
 #### Environment
 
-- OS: Linux
-- Python: 3.12+
-- Driver / runtime: NVIDIA CUDA environment with one H100 80 GB GPU
-- vLLM version: Match the repository requirements for your checkout
-- vLLM-Omni version or commit: Use the commit you are deploying from
-- Install: editable install from the vLLM-Omni repo root (`pip install -e .`); see the repository README for diffusion extras
-- Hugging Face access: `GD-ML/DreamX-World-5B-Cam` plus base `Wan-AI/Wan2.2-TI2V-5B-Diffusers` are fetched on first run
+- OS: Linux; Python 3.12
+- GPU: 1x NVIDIA H100 80GB HBM3, driver 580.126.09
+- vLLM version: 0.24.0 (torch 2.11.0+cu130)
+- vLLM-Omni: editable install from the repo root (`pip install -e .`)
+- `GD-ML/DreamX-World-5B-Cam` plus base `Wan-AI/Wan2.2-TI2V-5B-Diffusers`
+  are fetched on first run (~39 GB)
 
 #### Command
 
@@ -77,15 +76,31 @@ python examples/offline_inference/image_to_video/image_to_video.py \
 
 #### Verification
 
-A non-empty 704×1280, 121-frame MP4 is written to `dreamx_i2v.mp4`, with camera
-motion following the action sequence. For numerical fidelity, compare latents
-against the upstream `inference_dreamx_5b.sh` on the same `eval.json` item and seed.
+A 121-frame 704×1280 MP4 is written to `dreamx_i2v.mp4`; the camera pushes in
+(`w`), then pushes in while panning left (`wj`) — the same action sequence as
+the upstream reference for this `eval.json` item. Exact viewpoints differ
+slightly by design: vLLM-Omni's action-frame allocation intentionally diverges
+from upstream's (see Notes).
 
 #### Notes
 
+- **Measured (1x H100 80GB, command above, warm, mean of 3 runs):**
+  - I2V 704×1280, 121 frames, 50 steps → **~196 s** end-to-end
+    (denoise 3.71 s/step, VAE decode ~6.8 s); engine init ~57 s.
+  - Upstream DreamX reference on the same GPU, inputs, seed and sampler
+    (UniPC): ~292 s end-to-end, init ~152 s.
+- **Memory:** ~49.7 GB peak device memory (vs ~45.1 GB upstream) — fits a
+  single 80 GB GPU with headroom. The camera (PRoPE) branch requires
+  `sequence_parallel_size == 1` and `pipeline_parallel_size == 1`.
 - `num_frames` must satisfy the 1+4k pattern (e.g. 81, 121); it is snapped
   automatically. `121` frames = 5s @ 24fps; `81` = 5s @ 16fps.
 - Camera control is **required**: `action_seq` + `action_speed_list` must be
-  provided. The pipeline raises if they are missing (use the base `WanPipeline`
-  for plain image-to-video).
+  provided; the pipeline raises if they are missing (use the base
+  `WanPipeline` for plain image-to-video).
+- Frame 0 is the identity pose; the remaining `num_frames - 1` frames are
+  split near-evenly across actions (durations differ by at most 1), so
+  `num_frames >= len(action_seq) + 1`. Upstream instead gives every action
+  `ceil(num_frames / len(action_seq))` frames and truncates the tail; the
+  vLLM-Omni scheduling avoids under-representing the final action, at the cost
+  of slightly different trajectories than upstream for the same inputs.
 - The long-horizon autoregressive `DreamX-World-5B` model is out of scope.
