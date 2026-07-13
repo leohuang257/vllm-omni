@@ -21,12 +21,12 @@ import torch
 from fastapi import HTTPException, Request, UploadFile
 from fastapi.responses import Response, StreamingResponse
 from transformers.utils.hub import cached_file
+from vllm.entrypoints.generate.base.serving import GenerateBaseServing as OpenAIServing
 from vllm.entrypoints.launcher import terminate_if_errored
 from vllm.entrypoints.openai.engine.protocol import (
     ErrorResponse,
     RequestResponseMetadata,
 )
-from vllm.entrypoints.openai.engine.serving import OpenAIServing
 from vllm.inputs import tokens_input
 from vllm.logger import init_logger
 from vllm.multimodal.media import MediaConnector
@@ -1395,7 +1395,7 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
         emb_dim = len(embedding)
         if self._tts_model_type == "ming_tts":
             if emb_dim != 192:
-                logger.warning("speaker_embedding has %d dimensions; Ming dense expects 192", emb_dim)
+                raise ValueError(f"Ming speaker embedding must have 192 dims, got {emb_dim}")
         else:
             dim_err = self._validate_qwen_tts_speaker_embedding_dim(emb_dim)
             if dim_err is not None:
@@ -3495,12 +3495,18 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
         request_id = request_id or f"speech-{random_uuid()}"
         qwen3_ref_audio_warmup_artifact_key: str | None = None
 
-        # If this is a streaming request, we need to coerce
-        # cumulative outputs to delta outputs; this ensures
-        # we don't emit redundant MM data & drain after emitting.
+        # If this is a streaming request with real async chunks, we need to
+        # coerce cumulative outputs to delta outputs; this ensures we don't
+        # emit redundant MM data & drain after emitting. Qwen3-TTS full-payload
+        # (async_chunk=False) has no incremental audio chunks, so keep
+        # FINAL_ONLY semantics and let the streaming response send the final
+        # waveform once. Scoped to qwen3_tts: other async_chunk=False models
+        # keep the DELTA coercion they stream with today.
         # list() makes a copy to avoid mutating the params.
         sampling_params_list = list(self.engine_client.default_sampling_params_list)
-        is_streaming_request = request.is_streaming()
+        async_chunk = getattr(self.model_config, "async_chunk", True)
+        qwen3_full_payload = self._tts_model_type == "qwen3_tts" and not bool(async_chunk)
+        is_streaming_request = request.is_streaming() and not qwen3_full_payload
         sampling_params_list = coerce_param_message_types(sampling_params_list, is_streaming_request)
 
         # Build prompt + tts_params via the per-model adapter (RFC #4327). Every
@@ -3513,11 +3519,13 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
         # apply uploaded speakers inside validate(), which sets request.ref_audio
         # in place. The builders need to know whether the caller supplied audio
         # inline vs. via an uploaded voice.
+        model_type: str | None = None
         has_inline_ref_audio = request.ref_audio is not None
         if self._tts_model_type == "ming_flash_omni_tts":
             # ming_flash_omni is intentionally NOT migrated onto the adapter
             # framework in this PR (it has no registered adapter); keep it on the
             # legacy inline dispatch so serving still works.
+            model_type = "ming_flash_omni_tts"
             validation_error = self._validate_ming_flash_omni_tts_request(request)
             if validation_error:
                 raise ValueError(validation_error)
@@ -3531,6 +3539,7 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
             prepared = await adapter.build(request, sampling_params_list, has_inline_ref_audio)
             prompt = prepared.prompt
             tts_params = prepared.tts_params
+            model_type = prepared.model_type
             qwen3_ref_audio_warmup_artifact_key = prepared.warmup_artifact_key
         else:
             # Qwen omni models (Qwen3-Omni, Qwen2.5-Omni) use a "talker"
@@ -3554,36 +3563,11 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
             tts_params = {}
             prompt = {"prompt": request.input}
 
-        if self._tts_model_type == "step_audio2":
-            model_type = "step_audio2"
-        elif self._is_fish_speech:
-            model_type = "fish_speech"
-        elif self._tts_model_type == "covo_audio":
-            model_type = "covo_audio"
-        elif self._tts_model_type == "voxtral_tts":
-            model_type = "voxtral_tts"
-        elif self._tts_model_type == "cosyvoice3":
-            model_type = "cosyvoice3"
-        elif self._tts_model_type == "voxcpm2":
-            model_type = "voxcpm2"
-        elif self._tts_model_type == "ming_flash_omni_tts":
-            model_type = "ming_flash_omni_tts"
-        elif self._tts_model_type == "ming_tts":
-            model_type = "ming_tts"
-        elif self._tts_model_type == "moss_tts_nano":
-            model_type = "moss_tts_nano"
-        elif self._tts_model_type == "moss_tts":
-            model_type = "moss_tts"
-        elif self._tts_model_type == "higgs_audio_v2":
-            model_type = "higgs_audio_v2"
-        elif self._tts_model_type == "glm_tts":
-            model_type = "glm_tts"
-        elif self._tts_model_type == "indextts2":
-            model_type = "indextts2"
-        elif self._is_tts:
-            model_type = tts_params.get("task_type", ["unknown"])[0]
-        else:
-            model_type = "generic"
+        if model_type is None:
+            if self._is_tts:
+                model_type = tts_params.get("task_type", ["unknown"])[0]
+            else:
+                model_type = "generic"
         logger.info(
             "TTS speech request %s: text=%r, model=%s",
             request_id,
@@ -3708,6 +3692,18 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
             if stage0_params.extra_args is None:
                 stage0_params.extra_args = {}
             stage0_params.extra_args["tts_local_seed"] = request.seed
+
+        if self._tts_model_type == "qwen3_tts" and sampling_params_list:
+            stage0_params = sampling_params_list[0]
+            default_seed = getattr(stage0_params, "seed", None)
+            if default_seed is not None:
+                import copy
+
+                sampling_params_list = copy.deepcopy(sampling_params_list)
+                stage0_params = sampling_params_list[0]
+                if stage0_params.extra_args is None:
+                    stage0_params.extra_args = {}
+                stage0_params.extra_args.setdefault("tts_local_seed", int(default_seed))
 
         generator = self.engine_client.generate(
             prompt=prompt,
