@@ -14,10 +14,10 @@ from collections.abc import Iterable
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.model_executor.models.utils import PPMissingLayer, make_layers
 
+from vllm_omni.diffusion.attention.layer import Attention
 from vllm_omni.diffusion.forward_context import get_forward_context
 from vllm_omni.diffusion.layers.norm import RMSNorm
 
@@ -29,11 +29,13 @@ class CameraSelfAttention(nn.Module):
     """Parallel PRoPE self-attention branch (ported from DreamX PropeSelfAttention).
 
     Plain (TP-replicated) Linear projections + RMSNorm on Q/K; PRoPE transforms
-    via :func:`prope_qkv`; scaled-dot-product attention; ``out_proj`` zero-init so
-    the branch is a no-op until trained weights load.
+    via :func:`prope_qkv`; unified :class:`Attention` layer; ``out_proj`` zero-init
+    so the branch is a no-op until trained weights load.
     """
 
-    def __init__(self, dim: int, attn_dim: int, num_heads: int, qk_norm: bool = True, eps: float = 1e-6):
+    def __init__(
+        self, dim: int, attn_dim: int, num_heads: int, qk_norm: bool = True, eps: float = 1e-6, prefix: str = ""
+    ):
         super().__init__()
         assert attn_dim % num_heads == 0, f"attn_dim={attn_dim} not divisible by num_heads={num_heads}"
         self.dim = dim
@@ -54,6 +56,17 @@ class CameraSelfAttention(nn.Module):
         # Zero-init out_proj: parallel branch contributes nothing until trained.
         nn.init.zeros_(self.out_proj.weight)
         nn.init.zeros_(self.out_proj.bias)
+
+        # Unified attention layer; the camera (PRoPE) path is single-GPU only, so SP is skipped.
+        self.attn = Attention(
+            num_heads=self.num_heads,
+            head_size=self.head_dim,
+            softmax_scale=1.0 / (self.head_dim**0.5),
+            causal=False,
+            role="self",
+            skip_sequence_parallel=True,
+            prefix=f"{prefix}.attn" if prefix else "attn",
+        )
 
     def forward(self, x: torch.Tensor, cam_emb: dict) -> torch.Tensor:
         """x: ``[B, L, dim]`` (modulated+normed tokens). Returns ``[B, L, dim]``."""
@@ -79,8 +92,12 @@ class CameraSelfAttention(nn.Module):
             q.float(), k.float(), v.float(), viewmats=cam_emb["viewmats"].float(), Ks=cam_emb["K"].float()
         )
 
-        # SDPA over the sequence axis (layout [B, N, L, D]), in the activation dtype.
-        out = F.scaled_dot_product_attention(q.to(act_dtype), k.to(act_dtype), v.to(act_dtype))
+        # Attention in the activation dtype; the layer expects [B, L, N, D].
+        out = self.attn(
+            q.to(act_dtype).transpose(1, 2),
+            k.to(act_dtype).transpose(1, 2),
+            v.to(act_dtype).transpose(1, 2),
+        ).transpose(1, 2)
 
         # Inverse PRoPE transform (fp32) on the attention output, then project back.
         out = apply_fn_o(out.float()).to(act_dtype)
@@ -130,6 +147,7 @@ class WanCameraTransformerBlock(WanTransformerBlock):
                 num_heads=num_heads // attn_compress,
                 qk_norm=cam_qk_norm,
                 eps=eps,
+                prefix=f"{prefix}.cam_self_attn" if prefix else "cam_self_attn",
             )
         else:
             self.cam_self_attn = None
