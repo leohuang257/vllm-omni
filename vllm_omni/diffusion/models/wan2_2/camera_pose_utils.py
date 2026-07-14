@@ -1,5 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# Camera class adapted from CameraCtrl (Apache-2.0)
+# https://github.com/hehao13/CameraCtrl
+
 """Camera action -> pose trajectory -> PRoPE camera condition for DreamX-World-5B-Cam.
 
 Ported (PRoPE path only) from the upstream DreamX-World repo
