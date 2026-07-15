@@ -3167,9 +3167,22 @@ class MiniCPMOAudioEmbeddingItems(DictEmbeddingItems):
 
 
 def _minicpmo_field_config(hf_inputs: Mapping[str, torch.Tensor]):
+    audio_features = hf_inputs.get("audio_features", [])
+    audio_feature_lens = hf_inputs.get("audio_feature_lens", [])
+
+    # >30s audio: one audio_features entry per 30s chunk but one lens tensor
+    # per audio — group chunks by audio (flat: unpadded features vary in length).
+    if len(audio_features) > len(audio_feature_lens):
+        idxs = [0]
+        for lens in audio_feature_lens:
+            idxs.append(idxs[-1] + lens.numel())
+        audio_features_cfg = MultiModalFieldConfig.flat("audio", [slice(a, b) for a, b in zip(idxs, idxs[1:])])
+    else:
+        audio_features_cfg = MultiModalFieldConfig.batched("audio")
+
     return dict(
         **_minicpmv_field_config(hf_inputs),
-        audio_features=MultiModalFieldConfig.batched("audio"),
+        audio_features=audio_features_cfg,
         audio_feature_lens=MultiModalFieldConfig.batched("audio"),
         audio_embeds=MultiModalFieldConfig.batched("audio"),
     )
@@ -3361,11 +3374,14 @@ class MiniCPMO45OmniLLMMultiModalProcessor(BaseMultiModalProcessor[MiniCPMO45Omn
                 out_keys={"audio_features", "audio_feature_lens"},
             )
 
+            # Flatten per-audio chunk lengths to one length per chunk
+            # (>30s audio spans multiple 30s chunks).
+            flat_feature_lens = torch.hstack(list(audio_inputs["audio_feature_lens"])).tolist()
             unpadded_audio_features = [
                 feat[:, :feature_len]
                 for feat, feature_len in zip(
                     audio_inputs["audio_features"],
-                    audio_inputs["audio_feature_lens"],
+                    flat_feature_lens,
                 )
             ]
             audio_inputs["audio_features"] = unpadded_audio_features
