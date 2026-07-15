@@ -268,6 +268,11 @@ def test_extract_camera_condition_raises_when_missing(prompts) -> None:
         _extract_camera_condition(SimpleNamespace(prompts=prompts))
 
 
+def test_extract_camera_condition_rejects_batched_requests() -> None:
+    with pytest.raises(ValueError, match="batch size 1"):
+        _extract_camera_condition(SimpleNamespace(prompts=[{"prompt": "p1"}, {"prompt": "p2"}]))
+
+
 def test_forward_raises_instead_of_plain_i2v_fallback() -> None:
     # Lightweight instance: the raise must happen before super().forward(), so
     # no transformer/VAE/scheduler is needed.

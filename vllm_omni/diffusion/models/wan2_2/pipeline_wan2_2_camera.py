@@ -13,6 +13,7 @@ transformer as a CFG-invariant ``cam_emb``.
 from __future__ import annotations
 
 import json
+import logging
 import os
 from typing import Any
 
@@ -28,7 +29,7 @@ from vllm_omni.diffusion.model_loader.hub_prefetch import from_pretrained_with_p
 from vllm_omni.diffusion.request import OmniDiffusionRequest
 from vllm_omni.diffusion.worker.request_batch import DiffusionRequestBatch
 
-from .camera_pose_utils import build_camera_condition, validate_action_sequence
+from .camera_pose_utils import build_camera_condition
 from .pipeline_wan2_2 import (
     Wan22Pipeline,
     build_wan_scheduler,
@@ -36,6 +37,8 @@ from .pipeline_wan2_2 import (
     get_wan22_pre_process_func,
 )
 from .wan2_2_camera_transformer import WanCameraTransformer3DModel, create_camera_transformer_from_config
+
+logger = logging.getLogger(__name__)
 
 # Default base repo providing VAE / text_encoder / tokenizer / scheduler (DreamX's
 # HF metadata lists Wan2.2-T2V-5B; inference uses the unified TI2V-5B diffusers repo).
@@ -110,8 +113,6 @@ def get_wan22_camera_pre_process_func(od_config: OmniDiffusionConfig):
                     "camera control, use the base Wan2.2-TI2V-5B (WanPipeline)."
                 )
 
-        validate_action_sequence(action_seq, action_speed_list)
-
         num_frames = sp.num_frames
         if num_frames is None:
             raise ValueError("num_frames must be set when using camera control (action_seq/action_speed_list)")
@@ -120,7 +121,13 @@ def get_wan22_camera_pre_process_func(od_config: OmniDiffusionConfig):
         # post_patch_num_frames). For canonical 1+4k inputs (121/81) this matches
         # upstream exactly.
         if num_frames % _VAE_TEMPORAL != 1:
-            num_frames = num_frames // _VAE_TEMPORAL * _VAE_TEMPORAL + 1
+            snapped = num_frames // _VAE_TEMPORAL * _VAE_TEMPORAL + 1
+            logger.warning(
+                "num_frames=%d does not satisfy the Wan2.2 VAE 1+4k temporal pattern; snapping to %d.",
+                num_frames,
+                snapped,
+            )
+            num_frames = snapped
         num_frames = max(num_frames, 1)
         sp.num_frames = num_frames
 
@@ -153,8 +160,17 @@ def _extract_camera_condition(req: DiffusionRequestBatch) -> dict[str, torch.Ten
     silently continuing would hide such integration regressions. The dummy
     warmup always passes through the pre-process, which attaches a minimal
     trajectory, so this never fires during engine startup.
+
+    Batched requests are rejected up front: this helper only reads ``prompts[0]``,
+    and camera trajectories are per-request.
     """
-    first = req.prompts[0] if req.prompts else None
+    prompts = req.prompts
+    if len(prompts) > 1:
+        raise ValueError(
+            "WanCameraPipeline supports batch size 1: camera trajectories are "
+            "per-request and cannot be shared across a batched request."
+        )
+    first = prompts[0] if prompts else None
     cc = None
     if first is not None and not isinstance(first, str):
         cc = first.get("additional_information", {}).get("camera_condition")
