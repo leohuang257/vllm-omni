@@ -760,7 +760,9 @@ class MiniCPMVImageProcessor(BaseImageProcessor):
         )
 
 
-AutoImageProcessor.register("MiniCPMVImageProcessor", MiniCPMVImageProcessor)
+# transformers >= 5.5 requires the config *class* (not a string) as the first arg,
+# same as the gr00t fix in diffusion/models/gr00t/modeling/processing_gr00t_n1d7.py.
+AutoImageProcessor.register(MiniCPMOConfig, MiniCPMVImageProcessor)
 
 
 # ============== SigLIP Vision Transformer Classes ==============
