@@ -3,11 +3,11 @@
 
 """End-to-end test for DreamX-World-5B-Cam camera-controlled I2V (WanCameraPipeline)."""
 
-import numpy as np
 import pytest
 from PIL import Image
 
 from tests.helpers.mark import hardware_test
+from tests.helpers.media import generate_synthetic_image
 from tests.helpers.runtime import OmniRunnerHandler
 from vllm_omni.inputs.data import OmniDiffusionSamplingParams
 
@@ -23,11 +23,10 @@ NUM_FRAMES = 9
 
 def _start_image() -> Image.Image:
     """Create a deterministic test image for I2V tests."""
-    rng = np.random.RandomState(42)
-    return Image.fromarray(rng.randint(0, 256, (HEIGHT, WIDTH, 3), dtype=np.uint8))
+    return Image.fromarray(generate_synthetic_image(WIDTH, HEIGHT, seed=42)["np_array"])
 
 
-@pytest.mark.advanced_model
+@pytest.mark.slow
 @pytest.mark.diffusion
 @hardware_test(res={"cuda": "H100"}, num_cards={"cuda": 1})
 @pytest.mark.parametrize("omni_runner", [(MODEL, None)], indirect=True)
