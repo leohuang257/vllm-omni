@@ -2916,6 +2916,10 @@ class MiniCPMO45OmniLLMProcessingInfo(BaseProcessingInfo):
             if isinstance(val, np.ndarray):
                 setattr(image_processor, attr, val.tolist())
 
+        # vLLM's vendored MiniCPMOProcessor defaults to pool_step=2 (MiniCPM-o 2.6).
+        # Sync from hf_config (4.5 uses 5) so audio placeholder counts match the encoder.
+        hf_processor.pool_step = self.get_default_audio_pool_step()
+
         return hf_processor
 
     def get_hf_image_processor(self) -> MiniCPMVImageProcessor:
