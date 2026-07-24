@@ -27,6 +27,7 @@ This folder provides a unified CLI script for image-to-video generation using vL
 | `Wan-AI/Wan2.2-TI2V-5B-Diffusers` | 480 x 832 | 81 | 50 | 4.0 | Around 20–25 GiB BF16, smallest I2V model |
 | `hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-480p_i2v` | 480 x 832 | 121 | 50 | 6.0 | Around 100 GiB at default settings; the example enables `--enable-cpu-offload` + VAE tiling/slicing to fit an 80 GiB card |
 | LTX2 (local path + `--model-class-name LTX2ImageToVideoPipeline`) | 512 x 768 | 121 | 40 | 4.0 | Memory use depends on frame count and tensor parallelism |
+| `GD-ML/DreamX-World-5B-Cam` | 704 x 1280 | 121 | 50 | 3.0 | Around 50 GiB BF16 for basic single-card usage |
 
 !!! info
     Peak VRAM: based on basic single-card usage, batch size = 1, without any acceleration/optimization features. Some model weights cannot fit into one card with 80 GiB VRAM, which may need to use CPU offloading.
